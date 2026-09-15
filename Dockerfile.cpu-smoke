@@ -17,6 +17,7 @@ RUN pip install -r requirements.txt
 RUN pip install "gradio>=5.0,<7"
 
 COPY scripts /workspace/tools
+COPY colab_app.py /workspace/tools/colab_app.py
 RUN chmod +x /workspace/tools/*.sh
 
 CMD ["bash"]
