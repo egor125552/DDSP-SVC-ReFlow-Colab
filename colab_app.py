@@ -1,4 +1,5 @@
 import os
+import sys
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +15,8 @@ import torch
 import yaml
 
 DDSP_ROOT = Path(os.environ.get("DDSP_ROOT", "/content/DDSP-SVC")).resolve()
+if str(DDSP_ROOT) not in sys.path:
+    sys.path.insert(0, str(DDSP_ROOT))
 TRAIN_PROCESS = None
 TRAIN_LOG = None
 _RT_MODEL = None
@@ -30,7 +33,7 @@ def tail_text(path, lines=80):
     data = p.read_text(errors="replace").splitlines()
     return "\n".join(data[-lines:])
 
-def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab"):
+def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab", epochs=100000, interval_val=2000, interval_force_save=10000):
     src = DDSP_ROOT / "configs" / "reflow.yaml"
     dst = DDSP_ROOT / "configs" / "reflow-colab.yaml"
     cfg = yaml.safe_load(src.read_text())
@@ -41,8 +44,9 @@ def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab"):
     cfg["train"]["cache_device"] = "cpu"
     cfg["train"]["amp_dtype"] = "fp16" if torch.cuda.is_available() else "fp32"
     cfg["train"]["num_workers"] = 2 if torch.cuda.is_available() else 0
-    cfg["train"]["interval_val"] = 500
-    cfg["train"]["interval_force_save"] = 1000
+    cfg["train"]["epochs"] = max(1, int(epochs))
+    cfg["train"]["interval_val"] = max(1, int(interval_val))
+    cfg["train"]["interval_force_save"] = max(int(interval_force_save), int(interval_val))
     dst.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
     return dst
 
@@ -60,6 +64,7 @@ def system_status():
         DDSP_ROOT / "pretrain/contentvec/pytorch_model.bin",
         DDSP_ROOT / "pretrain/nsf_hifigan/model",
         DDSP_ROOT / "pretrain/nsf_hifigan/config.json",
+        DDSP_ROOT / "pretrain/rmvpe/model.pt",
     ]:
         parts.append(f"{p.name}: {'есть' if p.exists() else 'нет'}")
     return "\n".join(parts)
@@ -89,17 +94,17 @@ def prepare_dataset(zip_path, validation_count):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-def run_preprocess(batch_size, cache_all, exp_name):
-    cfg = make_config(batch_size, cache_all, exp_name)
+def run_preprocess(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save):
+    cfg = make_config(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save)
     cmd = ["python", "preprocess.py", "-c", str(cfg), "-j", "2"]
     p = subprocess.run(cmd, cwd=DDSP_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     return p.stdout[-12000:]
 
-def start_training(batch_size, cache_all, exp_name):
+def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save):
     global TRAIN_PROCESS, TRAIN_LOG
     if TRAIN_PROCESS is not None and TRAIN_PROCESS.poll() is None:
         return "Обучение уже идёт."
-    cfg = make_config(batch_size, cache_all, exp_name)
+    cfg = make_config(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save)
     log_dir = DDSP_ROOT / "logs"
     log_dir.mkdir(exist_ok=True)
     TRAIN_LOG = log_dir / "training.log"
@@ -152,7 +157,7 @@ def do_inference(input_audio, model_path, key, formant, threshold, steps, method
         "-i", str(input_audio), "-m", str(model), "-o", str(output),
         "-k", str(key), "-f", str(formant), "-th", str(threshold),
         "-step", str(int(steps)), "-method", str(method), "-ts", str(t_start),
-        "-pe", "rmvpe",
+        "-pe", "rmvpe" if torch.cuda.is_available() else "parselmouth",
     ]
     p = subprocess.run(cmd, cwd=DDSP_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if p.returncode != 0:
@@ -187,7 +192,8 @@ class BrowserSvc:
         hop = self.args.data.block_size * sr / self.args.data.sampling_rate
         win = self.args.data.volume_smooth_size * sr / self.args.data.sampling_rate
         audio_t = torch.from_numpy(audio).float().unsqueeze(0).to(self.device)
-        f0_ext = F0_Extractor("rmvpe", sr, hop, 50.0, 1100.0)
+        pitch_extractor = "rmvpe" if torch.cuda.is_available() else "parselmouth"
+        f0_ext = F0_Extractor(pitch_extractor, sr, hop, 50.0, 1100.0)
         f0 = f0_ext.extract(audio, uv_interp=True, device=self.device)
         f0 = torch.from_numpy(f0).float().to(self.device).unsqueeze(-1).unsqueeze(0)
         f0 = f0 * 2 ** (float(pitch) / 12)
@@ -260,9 +266,13 @@ with gr.Blocks(title="DDSP-SVC ReFlow для Google Colab") as demo:
         batch = gr.Slider(1, 48, value=32, step=1, label="Batch size. Для T4 начни с 32")
         cache = gr.Checkbox(value=False, label="Держать весь датасет в памяти")
         exp_name = gr.Textbox(value="reflow-colab", label="Имя эксперимента")
+        epochs = gr.Number(value=100000, precision=0, minimum=1, label="Количество эпох")
+        interval_val = gr.Number(value=2000, precision=0, minimum=1, label="Проверка и новый чекпойнт каждые N шагов")
+        interval_force_save = gr.Number(value=10000, precision=0, minimum=1, label="Оставлять постоянный чекпойнт каждые N шагов")
         train_log = gr.Textbox(label="Журнал", lines=18)
-        gr.Button("Подготовить признаки").click(run_preprocess, [batch, cache, exp_name], train_log)
-        gr.Button("Запустить обучение").click(start_training, [batch, cache, exp_name], train_log)
+        train_inputs = [batch, cache, exp_name, epochs, interval_val, interval_force_save]
+        gr.Button("Подготовить признаки").click(run_preprocess, train_inputs, train_log)
+        gr.Button("Запустить обучение").click(start_training, train_inputs, train_log)
         gr.Button("Показать статус").click(training_status, outputs=train_log)
         gr.Button("Остановить обучение").click(stop_training, outputs=train_log)
         last_ckpt = gr.Textbox(label="Последний чекпойнт")

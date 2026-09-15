@@ -19,8 +19,9 @@ cfg["train"]["batch_size"] = 1
 cfg["train"]["cache_all_data"] = False
 cfg["train"]["epochs"] = 1
 cfg["train"]["interval_log"] = 1
-cfg["train"]["interval_val"] = 1000
-cfg["train"]["interval_force_save"] = 1000
+cfg["train"]["interval_val"] = 2
+cfg["train"]["interval_force_save"] = 2
+cfg["infer"]["infer_step"] = 1
 cfg["env"]["expdir"] = "exp/reflow-smoke"
 dst.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
 print(dst)

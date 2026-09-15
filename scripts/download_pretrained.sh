@@ -24,7 +24,10 @@ echo "Скачиваю RMVPE..."
 tmpdir="$(mktemp -d)"
 curl -L --fail --retry 3   "https://github.com/yxlllc/RMVPE/releases/download/230917/rmvpe.zip"   -o "$tmpdir/rmvpe.zip"
 unzip -q "$tmpdir/rmvpe.zip" -d "$tmpdir/rmvpe"
-cp -R "$tmpdir/rmvpe"/. pretrain/
+mkdir -p pretrain/rmvpe
+rmvpe_model="$(find "$tmpdir/rmvpe" -type f -name model.pt | head -n 1)"
+test -n "$rmvpe_model"
+cp "$rmvpe_model" pretrain/rmvpe/model.pt
 rm -rf "$tmpdir"
 
 echo "Готово. Предобученные файлы находятся в $ROOT/pretrain"
