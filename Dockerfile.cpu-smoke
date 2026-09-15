@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+WORKDIR /workspace
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ffmpeg libsndfile1 curl unzip build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --upgrade pip setuptools wheel
+RUN pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+
+RUN git clone --depth 1 https://github.com/yxlllc/DDSP-SVC.git /workspace/DDSP-SVC
+WORKDIR /workspace/DDSP-SVC
+RUN pip install -r requirements.txt
+RUN pip install "gradio>=5.0,<7"
+
+COPY scripts /workspace/tools
+RUN chmod +x /workspace/tools/*.sh
+
+CMD ["bash"]
