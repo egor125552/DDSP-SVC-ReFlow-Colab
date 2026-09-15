@@ -41,6 +41,8 @@ def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab"):
     cfg["train"]["cache_device"] = "cpu"
     cfg["train"]["amp_dtype"] = "fp16" if torch.cuda.is_available() else "fp32"
     cfg["train"]["num_workers"] = 2 if torch.cuda.is_available() else 0
+    cfg["train"]["interval_val"] = 500
+    cfg["train"]["interval_force_save"] = 1000
     dst.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
     return dst
 
