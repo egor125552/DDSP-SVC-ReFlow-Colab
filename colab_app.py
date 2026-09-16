@@ -17,6 +17,12 @@ import soundfile as sf
 import torch
 import yaml
 
+TESTED_UPSTREAM_COMMIT = "3635301027473c6662d05a1c73ef34fba7f15f90"
+TESTED_PYTHON_MAJOR_MINOR = (3, 12)
+TESTED_TORCH_PREFIX = "2.11."
+TESTED_CUDA_PREFIX = "12.8"
+TESTED_GRADIO_VERSION = "6.27.0"
+
 DDSP_ROOT = Path(os.environ.get("DDSP_ROOT", "/content/DDSP-SVC")).resolve()
 if str(DDSP_ROOT) not in sys.path:
     sys.path.insert(0, str(DDSP_ROOT))
@@ -32,6 +38,21 @@ _RT_BUFFER = np.zeros(0, dtype=np.float32)
 
 def root_ok():
     return (DDSP_ROOT / "train_reflow.py").exists()
+
+def upstream_revision():
+    try:
+        p = subprocess.run(
+            ["git", "-C", str(DDSP_ROOT), "rev-parse", "HEAD"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        if p.returncode == 0:
+            return p.stdout.strip()
+    except Exception:
+        pass
+    return ""
 
 def training_is_running():
     return TRAIN_PROCESS is not None and TRAIN_PROCESS.poll() is None
@@ -268,10 +289,15 @@ def system_status():
     drive_free = free_space(drive_root) if drive_root.exists() else None
     data_bytes = directory_size(DDSP_ROOT / "data")
 
+    revision = upstream_revision()
     parts = [
         f"Папка DDSP-SVC: {DDSP_ROOT}",
         f"Исходники: {'найдены' if root_ok() else 'не найдены'}",
+        f"Upstream commit: {revision[:12] if revision else 'не удалось определить'}",
+        f"Python: {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         f"PyTorch: {torch.__version__}",
+        f"CUDA runtime: {torch.version.cuda}",
+        f"Gradio: {getattr(gr, '__version__', 'неизвестно')}",
         f"GPU: {gpu}",
         f"Датасет: train {train_wavs} WAV, val {val_wavs} WAV",
         f"Датасет ID: {dataset_fp[:12] if dataset_fp else 'нет'}",
@@ -1051,8 +1077,37 @@ def run_grader(exp_name):
     add("OK" if root_ok() else "ПРОБЛЕМА", "Исходники DDSP-SVC",
         str(DDSP_ROOT) if root_ok() else "train_reflow.py не найден")
 
+    revision = upstream_revision()
+    add(
+        "OK" if revision == TESTED_UPSTREAM_COMMIT else "ПРОБЛЕМА",
+        "Версия DDSP-SVC",
+        revision[:12] if revision else "git revision не определён",
+    )
+
+    python_ok = sys.version_info[:2] == TESTED_PYTHON_MAJOR_MINOR
+    add(
+        "OK" if python_ok else "ПРЕДУПРЕЖДЕНИЕ",
+        "Python",
+        f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}; тестировался 3.12.x",
+    )
+
+    gradio_version = getattr(gr, "__version__", "")
+    add(
+        "OK" if gradio_version == TESTED_GRADIO_VERSION else "ПРЕДУПРЕЖДЕНИЕ",
+        "Gradio",
+        f"{gradio_version or 'неизвестно'}; тестировался {TESTED_GRADIO_VERSION}",
+    )
+
     if torch.cuda.is_available():
-        add("OK", "GPU/CUDA", f"{torch.cuda.get_device_name(0)}, CUDA {torch.version.cuda}")
+        torch_ok = str(torch.__version__).startswith(TESTED_TORCH_PREFIX)
+        cuda_ok = str(torch.version.cuda).startswith(TESTED_CUDA_PREFIX)
+        status = "OK" if torch_ok and cuda_ok else "ПРЕДУПРЕЖДЕНИЕ"
+        add(
+            status,
+            "GPU/CUDA",
+            f"{torch.cuda.get_device_name(0)}, PyTorch {torch.__version__}, CUDA {torch.version.cuda}; "
+            "тестировались PyTorch 2.11.x / CUDA 12.8",
+        )
     else:
         add("ПРОБЛЕМА", "GPU/CUDA", "CUDA недоступна. Для Colab выбери GPU runtime.")
 
