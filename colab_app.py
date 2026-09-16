@@ -433,10 +433,38 @@ def prepare_dataset(zip_path, validation_count):
     try:
         try:
             with zipfile.ZipFile(zip_path) as z:
-                for member in z.infolist():
+                members = [m for m in z.infolist() if not m.is_dir()]
+                if len(members) > 20000:
+                    raise ValueError(f"слишком много файлов в ZIP: {len(members)} > 20000")
+
+                total_uncompressed = sum(max(0, int(m.file_size)) for m in members)
+                max_uncompressed = 20 * 1024 ** 3
+                if total_uncompressed > max_uncompressed:
+                    raise ValueError(
+                        f"распакованный ZIP слишком большой: {human_bytes(total_uncompressed)} > 20 ГБ"
+                    )
+
+                for member in members:
                     member_path = Path(member.filename)
                     if member_path.is_absolute() or ".." in member_path.parts:
                         raise ValueError(f"Небезопасный путь в ZIP: {member.filename}")
+
+                    compressed = max(1, int(member.compress_size))
+                    ratio = int(member.file_size) / compressed
+                    if member.file_size > 10 * 1024 ** 2 and ratio > 300:
+                        raise ValueError(
+                            f"подозрительно сильное сжатие ZIP: {member.filename}, коэффициент {ratio:.0f}x"
+                        )
+
+                local_free = free_space(tmp)
+                reserve = 2 * 1024 ** 3
+                if local_free is not None and total_uncompressed + reserve > local_free:
+                    raise ValueError(
+                        "не хватает локального места для безопасной распаковки: "
+                        f"нужно примерно {human_bytes(total_uncompressed + reserve)}, "
+                        f"свободно {human_bytes(local_free)}"
+                    )
+
                 z.extractall(tmp)
         except (zipfile.BadZipFile, ValueError) as exc:
             return f"ZIP не принят: {exc}. Старый датасет не изменён."
