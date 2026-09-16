@@ -281,6 +281,143 @@ def system_status():
         parts.append(f"{p.name}: {'есть' if p.exists() else 'нет'}")
     return "\n".join(parts)
 
+def analyze_dataset_quality(max_files=500, force=False):
+    dataset_fp = current_dataset_fingerprint()
+    cache_path = DDSP_ROOT / "data/dataset_quality.json"
+
+    if not force and cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(errors="replace"))
+            if cached.get("dataset_fingerprint") == dataset_fp:
+                return cached
+        except Exception:
+            pass
+
+    wavs = sorted((DDSP_ROOT / "data/train/audio").glob("*.wav"))
+    wavs += sorted((DDSP_ROOT / "data/val/audio").glob("*.wav"))
+    if not wavs:
+        result = {
+            "dataset_fingerprint": dataset_fp,
+            "analyzed": 0,
+            "total": 0,
+            "warnings": ["WAV файлы не найдены"],
+            "files": [],
+        }
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+        return result
+
+    total = len(wavs)
+    if total > max_files:
+        wavs = random.Random(42).sample(wavs, max_files)
+        wavs.sort()
+
+    rows = []
+    warnings = []
+    total_duration = 0.0
+    rms_values = []
+    peaks = []
+    silence_values = []
+    clipping_values = []
+
+    for path in wavs:
+        try:
+            audio, sr = librosa.load(path, sr=None, mono=True)
+            audio = np.asarray(audio, dtype=np.float32)
+            if audio.size == 0 or sr <= 0:
+                raise ValueError("пустой аудиофайл")
+
+            duration = audio.size / float(sr)
+            peak = float(np.max(np.abs(audio)))
+            rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))
+            rms_db = 20.0 * np.log10(max(rms, 1e-12))
+            silence_fraction = float(np.mean(np.abs(audio) < 0.0031623))  # примерно -50 dBFS
+            clipping_fraction = float(np.mean(np.abs(audio) >= 0.999))
+
+            flags = []
+            if peak < 0.01:
+                flags.append("почти пустой сигнал")
+            if rms_db < -35.0:
+                flags.append(f"очень тихо, RMS {rms_db:.1f} dBFS")
+            if silence_fraction > 0.60:
+                flags.append(f"много тишины, {silence_fraction * 100:.0f}%")
+            if clipping_fraction > 0.001:
+                flags.append(f"клиппинг, {clipping_fraction * 100:.2f}%")
+
+            rows.append({
+                "file": str(path.relative_to(DDSP_ROOT / "data")),
+                "duration": duration,
+                "peak": peak,
+                "rms_db": rms_db,
+                "silence_fraction": silence_fraction,
+                "clipping_fraction": clipping_fraction,
+                "flags": flags,
+            })
+            total_duration += duration
+            rms_values.append(rms_db)
+            peaks.append(peak)
+            silence_values.append(silence_fraction)
+            clipping_values.append(clipping_fraction)
+        except Exception as exc:
+            rows.append({
+                "file": str(path),
+                "flags": [f"не удалось прочитать: {exc}"],
+            })
+
+    flagged = [row for row in rows if row.get("flags")]
+    if flagged:
+        warnings.append(f"Подозрительных файлов: {len(flagged)} из {len(rows)}")
+
+    result = {
+        "dataset_fingerprint": dataset_fp,
+        "analyzed": len(rows),
+        "total": total,
+        "sampled": total > len(rows),
+        "total_duration_seconds": total_duration,
+        "median_rms_db": float(np.median(rms_values)) if rms_values else None,
+        "max_peak": max(peaks) if peaks else None,
+        "median_silence_fraction": float(np.median(silence_values)) if silence_values else None,
+        "max_clipping_fraction": max(clipping_values) if clipping_values else None,
+        "flagged_count": len(flagged),
+        "warnings": warnings,
+        "files": rows,
+    }
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    return result
+
+def dataset_quality_report(force=False):
+    result = analyze_dataset_quality(force=force)
+    analyzed = int(result.get("analyzed", 0))
+    total = int(result.get("total", 0))
+    if analyzed == 0:
+        return "Датасет не найден."
+
+    duration_min = float(result.get("total_duration_seconds", 0.0)) / 60.0
+    median_rms = result.get("median_rms_db")
+    median_silence = result.get("median_silence_fraction")
+    clipping = result.get("max_clipping_fraction")
+    flagged = int(result.get("flagged_count", 0))
+
+    lines = [
+        f"Проанализировано: {analyzed} из {total} WAV",
+        f"Суммарная длительность проанализированных файлов: {duration_min:.1f} мин",
+        f"Медианный RMS: {median_rms:.1f} dBFS" if median_rms is not None else "Медианный RMS: нет данных",
+        f"Медианная доля почти тишины: {median_silence * 100:.1f}%" if median_silence is not None else "Тишина: нет данных",
+        f"Максимальная доля клиппинга: {clipping * 100:.3f}%" if clipping is not None else "Клиппинг: нет данных",
+        f"Подозрительных файлов: {flagged}",
+    ]
+    if result.get("sampled"):
+        lines.append("Большой датасет: проверена воспроизводимая выборка максимум из 500 файлов.")
+
+    bad_rows = [row for row in result.get("files", []) if row.get("flags")]
+    for row in bad_rows[:15]:
+        lines.append(f"- {row.get('file')}: {', '.join(row.get('flags', []))}")
+    if len(bad_rows) > 15:
+        lines.append(f"... и ещё {len(bad_rows) - 15} подозрительных файлов.")
+
+    return "\n".join(lines)
+
 def prepare_dataset(zip_path, validation_count):
     if training_is_running():
         return "Сначала останови обучение. Нельзя менять датасет, пока trainer читает его файлы."
@@ -363,6 +500,7 @@ def prepare_dataset(zip_path, validation_count):
         if dataset_fingerprint:
             (data_root / "dataset_fingerprint.txt").write_text(dataset_fingerprint + "\n")
         (data_root / "preprocessing_manifest.json").unlink(missing_ok=True)
+        (data_root / "dataset_quality.json").unlink(missing_ok=True)
 
         skipped_notes = []
         if skipped_broken:
@@ -767,6 +905,19 @@ def run_grader(exp_name):
     add("OK" if dataset_fp else "ПРОБЛЕМА", "Dataset ID",
         dataset_fp[:12] if dataset_fp else "не найден")
 
+    quality = analyze_dataset_quality()
+    quality_flagged = int(quality.get("flagged_count", 0))
+    quality_analyzed = int(quality.get("analyzed", 0))
+    if quality_analyzed == 0:
+        add("ПРОБЛЕМА", "Качество аудио", "нет файлов для анализа")
+    elif quality_flagged == 0:
+        add("OK", "Качество аудио", f"проверено {quality_analyzed} файлов, явных проблем не найдено")
+    else:
+        ratio = quality_flagged / max(1, quality_analyzed)
+        status = "ПРОБЛЕМА" if ratio > 0.20 else "ПРЕДУПРЕЖДЕНИЕ"
+        add(status, "Качество аудио",
+            f"подозрительных файлов {quality_flagged}/{quality_analyzed}; открой вкладку Датасет для подробностей")
+
     integrity = preprocessing_integrity()
     if integrity["ready"]:
         add("OK", "Целостность preprocessing",
@@ -1011,8 +1162,12 @@ with gr.Blocks(title="DDSP-SVC ReFlow для Google Colab") as demo:
     with gr.Tab("Датасет"):
         dataset_zip = gr.File(label="ZIP с WAV файлами", file_types=[".zip"], type="filepath")
         val_count = gr.Slider(1, 30, value=10, step=1, label="Файлов для проверки")
-        dataset_status = gr.Textbox(label="Результат")
+        dataset_status = gr.Textbox(label="Результат", lines=12)
         gr.Button("Подготовить датасет").click(prepare_dataset, [dataset_zip, val_count], dataset_status)
+        gr.Button("Проверить качество датасета").click(
+            lambda: dataset_quality_report(force=True),
+            outputs=dataset_status,
+        )
     with gr.Tab("Обучение"):
         batch = gr.Slider(1, 48, value=32, step=1, label="Batch size. Для T4 начни с 32")
         cache = gr.Checkbox(value=False, label="Держать весь датасет в памяти")
