@@ -24,6 +24,8 @@ if DDSP_ROOT.exists():
     os.chdir(DDSP_ROOT)
 TRAIN_PROCESS = None
 TRAIN_LOG = None
+TRAIN_EXP_NAME = None
+TRAIN_FINAL_CHECK = None
 _RT_MODEL = None
 _RT_MODEL_PATH = None
 _RT_BUFFER = np.zeros(0, dtype=np.float32)
@@ -419,7 +421,7 @@ def run_preprocess(batch_size, cache_all, exp_name, epochs, interval_val, interv
     return output + "\n\nPreprocessing проверен и manifest сохранён."
 
 def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save, fast_local_data, save_optimizer, allow_dataset_change):
-    global TRAIN_PROCESS, TRAIN_LOG
+    global TRAIN_PROCESS, TRAIN_LOG, TRAIN_EXP_NAME, TRAIN_FINAL_CHECK
     if training_is_running():
         return "Обучение уже идёт."
     try:
@@ -534,6 +536,8 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
         stderr=subprocess.STDOUT,
         text=True,
     )
+    TRAIN_EXP_NAME = exp_name
+    TRAIN_FINAL_CHECK = None
     if resume_from:
         if previous_fp and previous_fp != dataset_fp:
             resume_note = f"Fine-tune с {Path(resume_from).name} на новом датасете."
@@ -551,8 +555,9 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
     )
 
 def training_status():
-    global TRAIN_PROCESS
+    global TRAIN_PROCESS, TRAIN_EXP_NAME, TRAIN_FINAL_CHECK
     state = "не запускалось"
+    code = None
     if TRAIN_PROCESS is not None:
         code = TRAIN_PROCESS.poll()
         state = "идёт" if code is None else f"завершено, код {code}"
@@ -567,11 +572,24 @@ def training_status():
             else:
                 finalize_pending_training(exp_name)
 
+    if code is not None and TRAIN_EXP_NAME and TRAIN_FINAL_CHECK is None:
+        latest = latest_checkpoint(TRAIN_EXP_NAME)
+        if code == 0 and latest:
+            TRAIN_FINAL_CHECK = "Проверка последнего checkpoint:\n" + inspect_checkpoint(latest)
+        elif code == 0:
+            TRAIN_FINAL_CHECK = (
+                "Training завершился с кодом 0, но checkpoint model_*.pt в "
+                f"exp/{TRAIN_EXP_NAME} не найден."
+            )
+        else:
+            TRAIN_FINAL_CHECK = "Training завершился с ошибкой; checkpoint автоматически не подтверждён."
+
     log = tail_text(TRAIN_LOG) if TRAIN_LOG else "Журнал пока пуст."
-    return f"Состояние: {state}\n\n{log}"
+    final = f"\n\n{TRAIN_FINAL_CHECK}" if TRAIN_FINAL_CHECK else ""
+    return f"Состояние: {state}\n\n{log}{final}"
 
 def stop_training():
-    global TRAIN_PROCESS
+    global TRAIN_PROCESS, TRAIN_FINAL_CHECK
     if TRAIN_PROCESS is None or TRAIN_PROCESS.poll() is not None:
         return "Активного обучения нет."
     TRAIN_PROCESS.terminate()
@@ -585,7 +603,8 @@ def stop_training():
         for pending in exp_root.glob("*/pending_dataset.json"):
             finalize_pending_training(pending.parent.name)
 
-    return "Обучение остановлено. Чекпойнты, которые успели сохраниться, не удалены."
+    TRAIN_FINAL_CHECK = "Обучение остановлено пользователем; сохранённые checkpoint не удалены."
+    return TRAIN_FINAL_CHECK
 
 def _checkpoint_step(path):
     try:
