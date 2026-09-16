@@ -575,6 +575,48 @@ def inspect_checkpoint(model_path):
         f"Optimizer: {'есть, полноценный resume' if has_optimizer else 'нет, продолжатся только веса и шаг'}",
     ])
 
+def bind_legacy_checkpoint_to_current_dataset(model_path):
+    if training_is_running():
+        return "Сначала останови обучение."
+    if not model_path:
+        return "Чекпойнт не выбран."
+
+    path = Path(model_path).expanduser()
+    if not path.exists():
+        return f"Файл не найден: {path}"
+    if path.suffix.lower() != ".pt":
+        return "Нужен checkpoint model_*.pt."
+
+    existing_fp = checkpoint_dataset_fingerprint(path)
+    if existing_fp:
+        return f"Checkpoint уже имеет Dataset ID {existing_fp[:12]}. Ничего не изменено."
+
+    dataset_fp = current_dataset_fingerprint()
+    if not dataset_fp:
+        return "Текущий датасет не найден или не имеет Dataset ID."
+
+    integrity = preprocessing_integrity()
+    if not integrity["ready"]:
+        return (
+            "Текущий preprocessing не готов полностью. "
+            f"Готово {integrity['complete']} из {integrity['total']} файлов. "
+            "Сначала подготовь и проверь признаки."
+        )
+
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        return f"Checkpoint не удалось прочитать: {exc}"
+    if not isinstance(ckpt, dict) or "model" not in ckpt or "global_step" not in ckpt:
+        return "Файл не похож на checkpoint DDSP-SVC: нужны ключи model и global_step."
+
+    sidecar = _checkpoint_dataset_sidecar(path)
+    sidecar.write_text(dataset_fp + "\n")
+    return (
+        f"Legacy checkpoint привязан к текущему Dataset ID {dataset_fp[:12]}. "
+        f"Файл: {path.name}, шаг: {ckpt.get('global_step')}."
+    )
+
 def do_inference(input_audio, model_path, key, formant, threshold, steps, method, t_start):
     if not input_audio:
         raise gr.Error("Нужен входной WAV.")
@@ -724,6 +766,11 @@ with gr.Blocks(title="DDSP-SVC ReFlow для Google Colab") as demo:
         ckpt_info = gr.Textbox(label="Проверка checkpoint", lines=6)
         gr.Button("Найти последний чекпойнт").click(latest_checkpoint, exp_name, last_ckpt)
         gr.Button("Проверить checkpoint").click(inspect_checkpoint, last_ckpt, ckpt_info)
+        gr.Button("Привязать legacy checkpoint к текущему Dataset ID").click(
+            bind_legacy_checkpoint_to_current_dataset,
+            last_ckpt,
+            ckpt_info,
+        )
     with gr.Tab("Генерация"):
         input_audio = gr.Audio(label="Исходный голос", type="filepath")
         model_path = gr.Textbox(label="Путь к model_*.pt", placeholder="/content/drive/MyDrive/...")
