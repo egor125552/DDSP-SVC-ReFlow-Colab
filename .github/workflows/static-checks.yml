@@ -1,0 +1,77 @@
+name: Static checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python syntax
+        run: |
+          python -m py_compile             colab_app.py             make_notebook.py             scripts/make_smoke_data.py             scripts/make_smoke_config.py
+
+      - name: Shell syntax
+        run: |
+          bash -n scripts/download_pretrained.sh
+          bash -n scripts/smoke_test.sh
+
+      - name: Notebook is generated from source
+        run: |
+          cp DDSP_SVC_ReFlow_Colab.ipynb /tmp/notebook-before.ipynb
+          python make_notebook.py
+          python - <<'PY'
+          import json
+          with open("/tmp/notebook-before.ipynb") as f:
+              before = json.load(f)
+          with open("DDSP_SVC_ReFlow_Colab.ipynb") as f:
+              after = json.load(f)
+          if before != after:
+              raise SystemExit("DDSP_SVC_ReFlow_Colab.ipynb is out of sync with make_notebook.py")
+          print("Notebook is in sync")
+          PY
+
+      - name: Reproducibility pins
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          upstream = "3635301027473c6662d05a1c73ef34fba7f15f90"
+          notebook = Path("DDSP_SVC_ReFlow_Colab.ipynb").read_text()
+          generator = Path("make_notebook.py").read_text()
+          dockerfile = Path("Dockerfile.cpu-smoke").read_text()
+          app = Path("colab_app.py").read_text()
+          extra = Path("requirements-extra.txt").read_text()
+
+          for name, text in {
+              "notebook": notebook,
+              "generator": generator,
+              "Dockerfile": dockerfile,
+              "colab_app": app,
+          }.items():
+              if upstream not in text:
+                  raise SystemExit(f"{name} does not contain pinned upstream commit")
+
+          required = {
+              "gradio==6.27.0",
+              "gradio_client==2.7.0",
+              "setuptools==80.9.0",
+          }
+          installed = {line.strip() for line in extra.splitlines() if line.strip()}
+          missing = required - installed
+          if missing:
+              raise SystemExit(f"Missing tested dependency pins: {sorted(missing)}")
+
+          print("Reproducibility pins are consistent")
+          PY
