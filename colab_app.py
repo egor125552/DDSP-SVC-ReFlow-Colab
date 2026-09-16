@@ -30,6 +30,9 @@ _RT_BUFFER = np.zeros(0, dtype=np.float32)
 def root_ok():
     return (DDSP_ROOT / "train_reflow.py").exists()
 
+def training_is_running():
+    return TRAIN_PROCESS is not None and TRAIN_PROCESS.poll() is None
+
 def tail_text(path, lines=80):
     p = Path(path)
     if not p.exists():
@@ -137,6 +140,8 @@ def system_status():
     return "\n".join(parts)
 
 def prepare_dataset(zip_path, validation_count):
+    if training_is_running():
+        return "Сначала останови обучение. Нельзя менять датасет, пока trainer читает его файлы."
     if not zip_path:
         return "Нужен ZIP с WAV файлами."
 
@@ -236,6 +241,8 @@ def prepare_dataset(zip_path, validation_count):
         shutil.rmtree(stage, ignore_errors=True)
 
 def run_preprocess(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save):
+    if training_is_running():
+        return "Сначала останови обучение. Preprocessing во время training заблокирован."
     cfg = make_config(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save)
     cmd = ["python", "preprocess.py", "-c", str(cfg), "-j", "2"]
     p = subprocess.run(cmd, cwd=DDSP_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -246,7 +253,7 @@ def run_preprocess(batch_size, cache_all, exp_name, epochs, interval_val, interv
 
 def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save, fast_local_data, save_optimizer, allow_dataset_change):
     global TRAIN_PROCESS, TRAIN_LOG
-    if TRAIN_PROCESS is not None and TRAIN_PROCESS.poll() is None:
+    if training_is_running():
         return "Обучение уже идёт."
 
     source = DDSP_ROOT / "data"
@@ -281,12 +288,25 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
     exp_dir.mkdir(parents=True, exist_ok=True)
     exp_fp_file.write_text(dataset_fp + "\n")
 
+    cache_note = ""
     if fast_local_data:
         local_data = Path(os.environ.get("DDSP_LOCAL_DATA", "/content/ddsp-local-data")).resolve()
-        shutil.rmtree(local_data, ignore_errors=True)
-        local_data.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source / "train", local_data / "train")
-        shutil.copytree(source / "val", local_data / "val")
+        local_fp_file = local_data / "dataset_fingerprint.txt"
+        cached_fp = local_fp_file.read_text(errors="replace").strip() if local_fp_file.exists() else ""
+        cache_ready = (
+            cached_fp == dataset_fp
+            and (local_data / "train/pitch_aug_dict.npy").exists()
+            and (local_data / "val/pitch_aug_dict.npy").exists()
+        )
+        if cache_ready:
+            cache_note = "Локальный кэш уже готов, повторное копирование не нужно."
+        else:
+            shutil.rmtree(local_data, ignore_errors=True)
+            local_data.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source / "train", local_data / "train")
+            shutil.copytree(source / "val", local_data / "val")
+            local_fp_file.write_text(dataset_fp + "\n")
+            cache_note = "Признаки скопированы с Drive в быстрый локальный кэш."
 
     cfg = make_config(
         batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save,
@@ -314,7 +334,11 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
     else:
         resume_note = "Готового чекпойнта нет, начинаем с нуля."
     optimizer_note = "Состояние optimizer сохраняется." if save_optimizer else "Optimizer не сохраняется."
-    return f"Обучение запущено. PID {TRAIN_PROCESS.pid}. {resume_note} {optimizer_note} Кнопка Статус покажет последние строки."
+    cache_suffix = f" {cache_note}" if cache_note else ""
+    return (
+        f"Обучение запущено. PID {TRAIN_PROCESS.pid}. {resume_note} {optimizer_note}"
+        f"{cache_suffix} Кнопка Статус покажет последние строки."
+    )
 
 def training_status():
     global TRAIN_PROCESS
