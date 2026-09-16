@@ -34,6 +34,20 @@ def root_ok():
 def training_is_running():
     return TRAIN_PROCESS is not None and TRAIN_PROCESS.poll() is None
 
+def validate_exp_name(exp_name):
+    name = str(exp_name or "").strip()
+    if not name:
+        raise ValueError("Имя эксперимента не может быть пустым.")
+    if name in {".", ".."}:
+        raise ValueError("Недопустимое имя эксперимента.")
+    if "/" in name or "\\" in name:
+        raise ValueError("В имени эксперимента нельзя использовать / или \\.")
+    if len(name) > 80:
+        raise ValueError("Имя эксперимента слишком длинное. Максимум 80 символов.")
+    if any(ord(ch) < 32 for ch in name):
+        raise ValueError("В имени эксперимента есть управляющие символы.")
+    return name
+
 def tail_text(path, lines=80):
     p = Path(path)
     if not p.exists():
@@ -189,6 +203,7 @@ def read_preprocessing_manifest():
         return None
 
 def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab", epochs=100000, interval_val=2000, interval_force_save=10000, fast_local_data=False, save_optimizer=True):
+    exp_name = validate_exp_name(exp_name)
     src = DDSP_ROOT / "configs" / "reflow.yaml"
     dst = DDSP_ROOT / "configs" / "reflow-colab.yaml"
     cfg = yaml.safe_load(src.read_text())
@@ -370,7 +385,10 @@ def run_preprocess(batch_size, cache_all, exp_name, epochs, interval_val, interv
     if training_is_running():
         return "Сначала останови обучение. Preprocessing во время training заблокирован."
 
-    cfg_path = make_config(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save)
+    try:
+        cfg_path = make_config(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save)
+    except ValueError as exc:
+        return str(exc)
     cfg = yaml.safe_load(cfg_path.read_text())
     expected_manifest = preprocessing_manifest_for_config(cfg)
     integrity = preprocessing_integrity()
@@ -404,6 +422,10 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
     global TRAIN_PROCESS, TRAIN_LOG
     if training_is_running():
         return "Обучение уже идёт."
+    try:
+        exp_name = validate_exp_name(exp_name)
+    except ValueError as exc:
+        return str(exc)
 
     source = DDSP_ROOT / "data"
     integrity = preprocessing_integrity()
@@ -587,6 +609,7 @@ def checkpoint_dataset_fingerprint(path):
         return ""
 
 def _pending_training_path(exp_name):
+    exp_name = validate_exp_name(exp_name)
     return DDSP_ROOT / "exp" / exp_name / "pending_dataset.json"
 
 def cleanup_checkpoint_metadata(exp_name):
@@ -657,6 +680,10 @@ def sync_pending_checkpoint_identity(exp_name):
     return str(latest)
 
 def latest_checkpoint(exp_name):
+    try:
+        exp_name = validate_exp_name(exp_name)
+    except ValueError:
+        return ""
     exp = DDSP_ROOT / "exp" / exp_name
     pts = list(exp.glob("model_*.pt"))
     return str(max(pts, key=_checkpoint_step)) if pts else ""
