@@ -1,5 +1,7 @@
 import os
 import sys
+import hashlib
+import random
 import shutil
 import subprocess
 import tempfile
@@ -136,6 +138,8 @@ def prepare_dataset(zip_path, validation_count):
         prepared = []
         skipped_broken = []
         skipped_short = []
+        skipped_duplicates = []
+        seen_audio = set()
         for src in wavs:
             try:
                 audio, _ = librosa.load(src, sr=44100, mono=True)
@@ -145,8 +149,15 @@ def prepare_dataset(zip_path, validation_count):
                 if duration < 0.5:
                     skipped_short.append((src.name, duration))
                     continue
+
                 out = stage / f"{len(prepared):05d}.wav"
                 sf.write(out, audio, 44100)
+                digest = hashlib.sha256(out.read_bytes()).hexdigest()
+                if digest in seen_audio:
+                    skipped_duplicates.append(src.name)
+                    out.unlink(missing_ok=True)
+                    continue
+                seen_audio.add(digest)
                 prepared.append(out)
             except Exception as exc:
                 skipped_broken.append((src.name, str(exc)))
@@ -157,6 +168,9 @@ def prepare_dataset(zip_path, validation_count):
                 "Нужно хотя бы 3. Старый датасет не изменён."
             )
 
+        # Фиксированное перемешивание не зависит от порядка файлов в ZIP,
+        # но даёт воспроизводимый train/val split между повторными импортами.
+        random.Random(42).shuffle(prepared)
         n_val = max(1, min(int(validation_count), len(prepared) // 5))
         new_train = stage / "final_train"
         new_val = stage / "final_val"
@@ -178,6 +192,8 @@ def prepare_dataset(zip_path, validation_count):
             skipped_notes.append(f"битых: {len(skipped_broken)}")
         if skipped_short:
             skipped_notes.append(f"короче 0,5 с: {len(skipped_short)}")
+        if skipped_duplicates:
+            skipped_notes.append(f"точных дублей: {len(skipped_duplicates)}")
         skipped_note = f" Пропущено WAV ({', '.join(skipped_notes)})." if skipped_notes else ""
         segment = training_segment_duration()
         return (
