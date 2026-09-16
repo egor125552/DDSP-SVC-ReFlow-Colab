@@ -17,6 +17,8 @@ import yaml
 DDSP_ROOT = Path(os.environ.get("DDSP_ROOT", "/content/DDSP-SVC")).resolve()
 if str(DDSP_ROOT) not in sys.path:
     sys.path.insert(0, str(DDSP_ROOT))
+if DDSP_ROOT.exists():
+    os.chdir(DDSP_ROOT)
 TRAIN_PROCESS = None
 TRAIN_LOG = None
 _RT_MODEL = None
@@ -38,6 +40,7 @@ def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab", epochs=
     dst = DDSP_ROOT / "configs" / "reflow-colab.yaml"
     cfg = yaml.safe_load(src.read_text())
     cfg["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+    cfg["data"]["f0_extractor"] = "rmvpe" if torch.cuda.is_available() else "parselmouth"
     cfg["env"]["expdir"] = f"exp/{exp_name}"
     cfg["train"]["batch_size"] = int(batch_size)
     cfg["train"]["cache_all_data"] = bool(cache_all)
