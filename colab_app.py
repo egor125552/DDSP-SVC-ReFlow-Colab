@@ -93,25 +93,47 @@ def system_status():
 def prepare_dataset(zip_path, validation_count):
     if not zip_path:
         return "Нужен ZIP с WAV файлами."
-    train_dir = DDSP_ROOT / "data/train/audio"
-    val_dir = DDSP_ROOT / "data/val/audio"
-    shutil.rmtree(train_dir, ignore_errors=True)
-    shutil.rmtree(val_dir, ignore_errors=True)
-    train_dir.mkdir(parents=True, exist_ok=True)
-    val_dir.mkdir(parents=True, exist_ok=True)
+
+    data_root = DDSP_ROOT / "data"
+    train_root = data_root / "train"
+    val_root = data_root / "val"
+    train_dir = train_root / "audio"
+    val_dir = val_root / "audio"
     tmp = Path(tempfile.mkdtemp(prefix="ddsp_dataset_"))
+
     try:
-        with zipfile.ZipFile(zip_path) as z:
-            z.extractall(tmp)
-        wavs = sorted([p for p in tmp.rglob("*") if p.suffix.lower() == ".wav"])
+        try:
+            with zipfile.ZipFile(zip_path) as z:
+                for member in z.infolist():
+                    member_path = Path(member.filename)
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        raise ValueError(f"Небезопасный путь в ZIP: {member.filename}")
+                z.extractall(tmp)
+        except (zipfile.BadZipFile, ValueError) as exc:
+            return f"ZIP не принят: {exc}. Старый датасет не изменён."
+
+        wavs = sorted([p for p in tmp.rglob("*") if p.is_file() and p.suffix.lower() == ".wav"])
         if len(wavs) < 3:
-            return "Нужно хотя бы 3 WAV файла. Лучше сотни коротких файлов."
+            return "Нужно хотя бы 3 WAV файла. Старый датасет не изменён."
+
+        # Новый датасет обязан получить новый preprocessing. Удаляем не только audio,
+        # но и старые f0/mel/units/volume, чтобы признаки разных датасетов не смешивались.
+        shutil.rmtree(train_root, ignore_errors=True)
+        shutil.rmtree(val_root, ignore_errors=True)
+        train_dir.mkdir(parents=True, exist_ok=True)
+        val_dir.mkdir(parents=True, exist_ok=True)
+
         n_val = max(1, min(int(validation_count), len(wavs) // 5))
         for idx, src in enumerate(wavs):
             audio, _ = librosa.load(src, sr=44100, mono=True)
             target_dir = val_dir if idx < n_val else train_dir
             sf.write(target_dir / f"{idx:05d}.wav", audio, 44100)
-        return f"Готово. Обучение: {len(wavs)-n_val} файлов. Проверка: {n_val}. Все приведено к 44,1 кГц mono."
+
+        return (
+            f"Готово. Обучение: {len(wavs)-n_val} файлов. Проверка: {n_val}. "
+            "Все приведено к 44,1 кГц mono. Старые признаки очищены, "
+            "теперь нажми «Подготовить признаки»."
+        )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -119,20 +141,28 @@ def run_preprocess(batch_size, cache_all, exp_name, epochs, interval_val, interv
     cfg = make_config(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save)
     cmd = ["python", "preprocess.py", "-c", str(cfg), "-j", "2"]
     p = subprocess.run(cmd, cwd=DDSP_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return p.stdout[-12000:]
+    output = p.stdout[-12000:]
+    if p.returncode != 0:
+        raise gr.Error("Preprocessing завершился с ошибкой.\n" + output[-5000:])
+    return output
 
 def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save, fast_local_data, save_optimizer):
     global TRAIN_PROCESS, TRAIN_LOG
     if TRAIN_PROCESS is not None and TRAIN_PROCESS.poll() is None:
         return "Обучение уже идёт."
 
+    source = DDSP_ROOT / "data"
+    preprocess_ready = (
+        (source / "train/pitch_aug_dict.npy").exists()
+        and (source / "val/pitch_aug_dict.npy").exists()
+    )
+    if not preprocess_ready:
+        return "Сначала нажми «Подготовить признаки». Готовый preprocessing не найден."
+
     resume_from = latest_checkpoint(exp_name)
 
     if fast_local_data:
-        source = DDSP_ROOT / "data"
         local_data = Path(os.environ.get("DDSP_LOCAL_DATA", "/content/ddsp-local-data")).resolve()
-        if not (source / "train/pitch_aug_dict.npy").exists() or not (source / "val/pitch_aug_dict.npy").exists():
-            return "Сначала нажми «Подготовить признаки». Готовый preprocessing не найден."
         shutil.rmtree(local_data, ignore_errors=True)
         local_data.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source / "train", local_data / "train")
