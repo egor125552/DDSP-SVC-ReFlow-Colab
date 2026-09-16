@@ -124,18 +124,34 @@ def training_segment_duration():
     shortest = min(durations)
     return round(max(0.25, min(2.0, shortest - 0.05)), 3)
 
-def preprocessing_integrity():
+def preprocessing_integrity(force=False):
+    cache_path = DDSP_ROOT / "data/preprocessing_integrity.json"
+    dataset_fp = current_dataset_fingerprint()
+    manifest = read_preprocessing_manifest() if "read_preprocessing_manifest" in globals() else None
+    manifest_token = hashlib.sha256(
+        json.dumps(manifest or {}, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+    if not force and cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(errors="replace"))
+            if (
+                cached.get("dataset_fingerprint") == dataset_fp
+                and cached.get("manifest_token") == manifest_token
+            ):
+                cached["cached"] = True
+                return cached
+        except Exception:
+            pass
+
     required_features = ("f0", "volume", "aug_vol", "mel", "aug_mel", "units")
     total = 0
     complete = 0
     problems = []
-
     for split in ("train", "val"):
         root = DDSP_ROOT / "data" / split
-        audio_dir = root / "audio"
-        wavs = sorted(audio_dir.glob("*.wav"))
+        wavs = sorted((root / "audio").glob("*.wav"))
         total += len(wavs)
-
         pitch_dict = {}
         pitch_path = root / "pitch_aug_dict.npy"
         if pitch_path.exists():
@@ -148,7 +164,6 @@ def preprocessing_integrity():
                 problems.append(f"{split}/pitch_aug_dict.npy повреждён: {exc}")
         elif wavs:
             problems.append(f"{split}/pitch_aug_dict.npy отсутствует")
-
         for wav in wavs:
             name_ext = wav.name
             file_ok = True
@@ -165,21 +180,24 @@ def preprocessing_integrity():
                 except Exception as exc:
                     problems.append(f"{split}/{feature}/{name_ext}.npy повреждён: {exc}")
                     file_ok = False
-
             if name_ext not in pitch_dict:
                 problems.append(f"{split}/pitch_aug_dict.npy не содержит {name_ext}")
                 file_ok = False
-
             if file_ok:
                 complete += 1
 
-    ready = total > 0 and complete == total and not problems
-    return {
-        "ready": ready,
+    result = {
+        "ready": total > 0 and complete == total and not problems,
         "total": total,
         "complete": complete,
         "problems": problems,
+        "dataset_fingerprint": dataset_fp,
+        "manifest_token": manifest_token,
+        "cached": False,
     }
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    return result
 
 def preprocessing_manifest_for_config(cfg):
     data = cfg.get("data", {})
@@ -529,6 +547,7 @@ def prepare_dataset(zip_path, validation_count):
             (data_root / "dataset_fingerprint.txt").write_text(dataset_fingerprint + "\n")
         (data_root / "preprocessing_manifest.json").unlink(missing_ok=True)
         (data_root / "dataset_quality.json").unlink(missing_ok=True)
+        (data_root / "preprocessing_integrity.json").unlink(missing_ok=True)
 
         skipped_notes = []
         if skipped_broken:
@@ -574,7 +593,7 @@ def run_preprocess(batch_size, cache_all, exp_name, epochs, interval_val, interv
     if p.returncode != 0:
         raise gr.Error("Preprocessing завершился с ошибкой.\n" + output[-5000:])
 
-    integrity_after = preprocessing_integrity()
+    integrity_after = preprocessing_integrity(force=True)
     if not integrity_after["ready"]:
         details = "; ".join(integrity_after["problems"][:3])
         raise gr.Error(
@@ -1343,6 +1362,10 @@ with gr.Blocks(title="DDSP-SVC ReFlow для Google Colab") as demo:
         preprocess_inputs = [batch, cache, exp_name, epochs, interval_val, interval_force_save]
         training_inputs = preprocess_inputs + [fast_local_data, save_optimizer, allow_dataset_change]
         gr.Button("Подготовить признаки").click(run_preprocess, preprocess_inputs, train_log)
+        gr.Button("Полностью перепроверить preprocessing").click(
+            lambda: str(preprocessing_integrity(force=True)),
+            outputs=train_log,
+        )
         gr.Button("Запустить обучение").click(start_training, training_inputs, train_log)
         gr.Button("Показать статус").click(training_status, outputs=train_log)
         gr.Button("Остановить обучение").click(stop_training, outputs=train_log)
