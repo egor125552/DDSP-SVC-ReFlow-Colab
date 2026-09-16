@@ -873,6 +873,130 @@ def latest_checkpoint(exp_name):
     pts = list(exp.glob("model_*.pt"))
     return str(max(pts, key=_checkpoint_step)) if pts else ""
 
+def checkpoint_cleanup_plan(exp_name, keep_permanent=3):
+    try:
+        exp_name = validate_exp_name(exp_name)
+    except ValueError as exc:
+        return {"error": str(exc), "delete": [], "keep": [], "bytes": 0}
+
+    keep_permanent = max(1, int(keep_permanent))
+    exp_dir = DDSP_ROOT / "exp" / exp_name
+    checkpoints = sorted(exp_dir.glob("model_*.pt"), key=_checkpoint_step)
+    if not checkpoints:
+        return {"error": "", "delete": [], "keep": [], "bytes": 0}
+
+    latest = checkpoints[-1]
+    latest_fp = checkpoint_dataset_fingerprint(latest)
+    if not latest_fp:
+        return {
+            "error": "У последнего checkpoint нет Dataset ID. Автоматическая очистка заблокирована.",
+            "delete": [], "keep": [str(p) for p in checkpoints], "bytes": 0,
+        }
+
+    force_interval = None
+    config_path = exp_dir / "config.yaml"
+    if config_path.exists():
+        try:
+            saved_cfg = yaml.safe_load(config_path.read_text())
+            force_interval = int(saved_cfg.get("train", {}).get("interval_force_save", 0))
+            if force_interval <= 0:
+                force_interval = None
+        except Exception:
+            force_interval = None
+
+    same_dataset = [
+        p for p in checkpoints
+        if checkpoint_dataset_fingerprint(p) == latest_fp
+    ]
+    protected_other = [p for p in checkpoints if p not in same_dataset]
+
+    if force_interval:
+        permanent = [p for p in same_dataset if _checkpoint_step(p) % force_interval == 0]
+    else:
+        permanent = same_dataset[:]
+
+    keep = set(protected_other)
+    keep.add(latest)
+    keep.update(permanent[-keep_permanent:])
+
+    pending_path = _pending_training_path(exp_name)
+    if pending_path.exists():
+        try:
+            pending = json.loads(pending_path.read_text(errors="replace"))
+            resume_name = str(pending.get("resume_from", "")).strip()
+            if resume_name:
+                resume_path = exp_dir / resume_name
+                if resume_path.exists():
+                    keep.add(resume_path)
+        except Exception:
+            pass
+
+    delete = [p for p in same_dataset if p not in keep]
+    total_bytes = sum(p.stat().st_size for p in delete if p.exists())
+    return {
+        "error": "",
+        "delete": [str(p) for p in delete],
+        "keep": [str(p) for p in sorted(keep, key=_checkpoint_step)],
+        "bytes": total_bytes,
+        "dataset_fingerprint": latest_fp,
+        "force_interval": force_interval,
+    }
+
+def checkpoint_cleanup_preview(exp_name, keep_permanent=3):
+    plan = checkpoint_cleanup_plan(exp_name, keep_permanent)
+    if plan.get("error"):
+        return plan["error"]
+    delete = [Path(p) for p in plan["delete"]]
+    keep = [Path(p) for p in plan["keep"]]
+    lines = [
+        f"Dataset ID последнего checkpoint: {plan.get('dataset_fingerprint', '')[:12]}",
+        f"Постоянный интервал: {plan.get('force_interval') or 'не удалось определить'}",
+        f"Оставить checkpoint: {len(keep)}",
+        f"Можно удалить: {len(delete)}",
+        f"Освободится примерно: {human_bytes(plan.get('bytes', 0))}",
+    ]
+    if delete:
+        lines.append("")
+        lines.append("Будут удалены:")
+        lines.extend(f"- {p.name}" for p in delete[:30])
+        if len(delete) > 30:
+            lines.append(f"... и ещё {len(delete) - 30}.")
+    return "\n".join(lines)
+
+def cleanup_old_checkpoints(exp_name, keep_permanent=3):
+    if training_is_running():
+        return "Сначала останови обучение. Во время training checkpoint не удаляются."
+
+    plan = checkpoint_cleanup_plan(exp_name, keep_permanent)
+    if plan.get("error"):
+        return plan["error"]
+
+    deleted = []
+    failed = []
+    for raw in plan["delete"]:
+        path = Path(raw)
+        try:
+            size = path.stat().st_size if path.exists() else 0
+            sidecar = _checkpoint_dataset_sidecar(path)
+            path.unlink(missing_ok=True)
+            sidecar.unlink(missing_ok=True)
+            deleted.append((path.name, size))
+        except Exception as exc:
+            failed.append(f"{path.name}: {exc}")
+
+    cleanup_checkpoint_metadata(exp_name)
+    freed = sum(size for _, size in deleted)
+    lines = [
+        f"Удалено checkpoint: {len(deleted)}",
+        f"Освобождено примерно: {human_bytes(freed)}",
+    ]
+    if failed:
+        lines.append("Не удалось удалить:")
+        lines.extend(f"- {item}" for item in failed[:10])
+    if not deleted and not failed:
+        lines.append("Удалять нечего.")
+    return "\n".join(lines)
+
 def inspect_checkpoint(model_path):
     if not model_path:
         return "Чекпойнт не выбран."
@@ -1229,6 +1353,22 @@ with gr.Blocks(title="DDSP-SVC ReFlow для Google Colab") as demo:
         gr.Button("Привязать legacy checkpoint к текущему Dataset ID").click(
             bind_legacy_checkpoint_to_current_dataset,
             last_ckpt,
+            ckpt_info,
+        )
+        keep_ckpt = gr.Number(
+            value=3,
+            precision=0,
+            minimum=1,
+            label="Сколько последних постоянных checkpoint оставлять при очистке",
+        )
+        gr.Button("Показать план очистки checkpoint").click(
+            checkpoint_cleanup_preview,
+            [exp_name, keep_ckpt],
+            ckpt_info,
+        )
+        gr.Button("Удалить checkpoint по этому правилу").click(
+            cleanup_old_checkpoints,
+            [exp_name, keep_ckpt],
             ckpt_info,
         )
     with gr.Tab("Грейдер"):
