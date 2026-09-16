@@ -35,12 +35,16 @@ def tail_text(path, lines=80):
     data = p.read_text(errors="replace").splitlines()
     return "\n".join(data[-lines:])
 
-def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab", epochs=100000, interval_val=2000, interval_force_save=10000):
+def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab", epochs=100000, interval_val=2000, interval_force_save=10000, fast_local_data=False):
     src = DDSP_ROOT / "configs" / "reflow.yaml"
     dst = DDSP_ROOT / "configs" / "reflow-colab.yaml"
     cfg = yaml.safe_load(src.read_text())
     cfg["device"] = "cuda" if torch.cuda.is_available() else "cpu"
     cfg["data"]["f0_extractor"] = "rmvpe" if torch.cuda.is_available() else "parselmouth"
+    if fast_local_data:
+        local_data = Path(os.environ.get("DDSP_LOCAL_DATA", "/content/ddsp-local-data")).resolve()
+        cfg["data"]["train_path"] = str(local_data / "train")
+        cfg["data"]["valid_path"] = str(local_data / "val")
     cfg["env"]["expdir"] = f"exp/{exp_name}"
     cfg["train"]["batch_size"] = int(batch_size)
     cfg["train"]["cache_all_data"] = bool(cache_all)
@@ -103,11 +107,25 @@ def run_preprocess(batch_size, cache_all, exp_name, epochs, interval_val, interv
     p = subprocess.run(cmd, cwd=DDSP_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     return p.stdout[-12000:]
 
-def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save):
+def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save, fast_local_data):
     global TRAIN_PROCESS, TRAIN_LOG
     if TRAIN_PROCESS is not None and TRAIN_PROCESS.poll() is None:
         return "Обучение уже идёт."
-    cfg = make_config(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save)
+
+    if fast_local_data:
+        source = DDSP_ROOT / "data"
+        local_data = Path(os.environ.get("DDSP_LOCAL_DATA", "/content/ddsp-local-data")).resolve()
+        if not (source / "train/pitch_aug_dict.npy").exists() or not (source / "val/pitch_aug_dict.npy").exists():
+            return "Сначала нажми «Подготовить признаки». Готовый preprocessing не найден."
+        shutil.rmtree(local_data, ignore_errors=True)
+        local_data.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source / "train", local_data / "train")
+        shutil.copytree(source / "val", local_data / "val")
+
+    cfg = make_config(
+        batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save,
+        fast_local_data=bool(fast_local_data),
+    )
     log_dir = DDSP_ROOT / "logs"
     log_dir.mkdir(exist_ok=True)
     TRAIN_LOG = log_dir / "training.log"
@@ -272,10 +290,15 @@ with gr.Blocks(title="DDSP-SVC ReFlow для Google Colab") as demo:
         epochs = gr.Number(value=100000, precision=0, minimum=1, label="Количество эпох")
         interval_val = gr.Number(value=2000, precision=0, minimum=1, label="Проверка и новый чекпойнт каждые N шагов")
         interval_force_save = gr.Number(value=10000, precision=0, minimum=1, label="Оставлять постоянный чекпойнт каждые N шагов")
+        fast_local_data = gr.Checkbox(
+            value=True,
+            label="Быстрый локальный кэш для обучения. Признаки останутся на Google Drive, но обучение будет читать их из /content",
+        )
         train_log = gr.Textbox(label="Журнал", lines=18)
-        train_inputs = [batch, cache, exp_name, epochs, interval_val, interval_force_save]
-        gr.Button("Подготовить признаки").click(run_preprocess, train_inputs, train_log)
-        gr.Button("Запустить обучение").click(start_training, train_inputs, train_log)
+        preprocess_inputs = [batch, cache, exp_name, epochs, interval_val, interval_force_save]
+        training_inputs = preprocess_inputs + [fast_local_data]
+        gr.Button("Подготовить признаки").click(run_preprocess, preprocess_inputs, train_log)
+        gr.Button("Запустить обучение").click(start_training, training_inputs, train_log)
         gr.Button("Показать статус").click(training_status, outputs=train_log)
         gr.Button("Остановить обучение").click(stop_training, outputs=train_log)
         last_ckpt = gr.Textbox(label="Последний чекпойнт")
