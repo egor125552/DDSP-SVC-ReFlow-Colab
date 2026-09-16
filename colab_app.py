@@ -1,6 +1,7 @@
 import os
 import sys
 import hashlib
+import json
 import random
 import shutil
 import subprocess
@@ -137,6 +138,29 @@ def preprocessing_integrity():
         "problems": problems,
     }
 
+def preprocessing_manifest_for_config(cfg):
+    data = cfg.get("data", {})
+    return {
+        "dataset_fingerprint": current_dataset_fingerprint(),
+        "f0_extractor": data.get("f0_extractor"),
+        "sampling_rate": data.get("sampling_rate"),
+        "block_size": data.get("block_size"),
+        "encoder": data.get("encoder"),
+        "encoder_sample_rate": data.get("encoder_sample_rate"),
+        "encoder_hop_size": data.get("encoder_hop_size"),
+        "encoder_out_channels": data.get("encoder_out_channels"),
+    }
+
+def read_preprocessing_manifest():
+    path = DDSP_ROOT / "data/preprocessing_manifest.json"
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(errors="replace"))
+        return value if isinstance(value, dict) else None
+    except Exception:
+        return None
+
 def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab", epochs=100000, interval_val=2000, interval_force_save=10000, fast_local_data=False, save_optimizer=True):
     src = DDSP_ROOT / "configs" / "reflow.yaml"
     dst = DDSP_ROOT / "configs" / "reflow-colab.yaml"
@@ -169,6 +193,9 @@ def system_status():
     val_wavs = len(list((DDSP_ROOT / "data/val/audio").glob("*.wav")))
     dataset_fp = current_dataset_fingerprint()
     integrity = preprocessing_integrity()
+    manifest = read_preprocessing_manifest()
+    manifest_dataset = manifest.get("dataset_fingerprint", "") if manifest else ""
+    manifest_matches_dataset = bool(dataset_fp and manifest_dataset == dataset_fp)
     exp_root = DDSP_ROOT / "exp"
     checkpoints = list(exp_root.glob("*/model_*.pt")) if exp_root.exists() else []
     last_ckpt = max(checkpoints, key=_checkpoint_step) if checkpoints else None
@@ -182,8 +209,12 @@ def system_status():
         f"Датасет ID: {dataset_fp[:12] if dataset_fp else 'нет'}",
         (
             f"Preprocessing: готов, {integrity['complete']}/{integrity['total']} файлов"
-            if integrity["ready"]
-            else f"Preprocessing: не готов, {integrity['complete']}/{integrity['total']} файлов полностью подготовлено"
+            if integrity["ready"] and manifest_matches_dataset
+            else (
+                f"Preprocessing: файлы целы, но manifest не совпадает с текущим датасетом"
+                if integrity["ready"]
+                else f"Preprocessing: не готов, {integrity['complete']}/{integrity['total']} файлов полностью подготовлено"
+            )
         ),
         f"Сегмент обучения: {training_segment_duration():.3f} с",
         f"Последний checkpoint: {last_ckpt.name if last_ckpt else 'нет'}",
@@ -278,6 +309,7 @@ def prepare_dataset(zip_path, validation_count):
         dataset_fingerprint = calculate_dataset_fingerprint()
         if dataset_fingerprint:
             (data_root / "dataset_fingerprint.txt").write_text(dataset_fingerprint + "\n")
+        (data_root / "preprocessing_manifest.json").unlink(missing_ok=True)
 
         skipped_notes = []
         if skipped_broken:
@@ -301,13 +333,36 @@ def prepare_dataset(zip_path, validation_count):
 def run_preprocess(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save):
     if training_is_running():
         return "Сначала останови обучение. Preprocessing во время training заблокирован."
-    cfg = make_config(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save)
-    cmd = ["python", "preprocess.py", "-c", str(cfg), "-j", "2"]
+
+    cfg_path = make_config(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save)
+    cfg = yaml.safe_load(cfg_path.read_text())
+    expected_manifest = preprocessing_manifest_for_config(cfg)
+    integrity = preprocessing_integrity()
+    current_manifest = read_preprocessing_manifest()
+
+    if integrity["ready"] and current_manifest == expected_manifest:
+        return (
+            f"Preprocessing уже актуален: {integrity['complete']}/{integrity['total']} файлов готовы. "
+            "Повторный запуск ContentVec/F0 не нужен."
+        )
+
+    cmd = ["python", "preprocess.py", "-c", str(cfg_path), "-j", "2"]
     p = subprocess.run(cmd, cwd=DDSP_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     output = p.stdout[-12000:]
     if p.returncode != 0:
         raise gr.Error("Preprocessing завершился с ошибкой.\n" + output[-5000:])
-    return output
+
+    integrity_after = preprocessing_integrity()
+    if not integrity_after["ready"]:
+        details = "; ".join(integrity_after["problems"][:3])
+        raise gr.Error(
+            "Preprocessing завершился, но проверка целостности не пройдена. "
+            f"Готово {integrity_after['complete']}/{integrity_after['total']}. {details}"
+        )
+
+    manifest_path = DDSP_ROOT / "data/preprocessing_manifest.json"
+    manifest_path.write_text(json.dumps(expected_manifest, ensure_ascii=False, indent=2) + "\n")
+    return output + "\n\nPreprocessing проверен и manifest сохранён."
 
 def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save, fast_local_data, save_optimizer, allow_dataset_change):
     global TRAIN_PROCESS, TRAIN_LOG
