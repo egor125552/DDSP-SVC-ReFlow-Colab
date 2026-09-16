@@ -380,6 +380,20 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
             f"{suffix}"
         )
 
+    preview_cfg_path = make_config(
+        batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save,
+        fast_local_data=False,
+        save_optimizer=bool(save_optimizer),
+    )
+    preview_cfg = yaml.safe_load(preview_cfg_path.read_text())
+    expected_manifest = preprocessing_manifest_for_config(preview_cfg)
+    current_manifest = read_preprocessing_manifest()
+    if current_manifest != expected_manifest:
+        return (
+            "Preprocessing сделан с другой конфигурацией или manifest отсутствует. "
+            "Нажми «Подготовить признаки», чтобы обновить ContentVec/F0 перед training."
+        )
+
     dataset_fp = current_dataset_fingerprint()
     if not dataset_fp:
         return "Не удалось определить fingerprint датасета. Подготовь датасет заново."
