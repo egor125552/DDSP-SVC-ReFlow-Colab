@@ -25,9 +25,14 @@ print('Google Drive подключён')"""),
     code("""!apt-get -qq update
 !apt-get -qq install -y ffmpeg libsndfile1 unzip
 !rm -rf /content/DDSP-SVC /content/DDSP-SVC-ReFlow-Colab
-!git clone --depth 1 https://github.com/yxlllc/DDSP-SVC.git /content/DDSP-SVC
+!mkdir -p /content/DDSP-SVC
+!git -C /content/DDSP-SVC init -q
+!git -C /content/DDSP-SVC remote add origin https://github.com/yxlllc/DDSP-SVC.git
+!git -C /content/DDSP-SVC fetch -q --depth 1 origin 3635301027473c6662d05a1c73ef34fba7f15f90
+!git -C /content/DDSP-SVC checkout -q --detach FETCH_HEAD
 !git clone --depth 1 https://github.com/egor125552/DDSP-SVC-ReFlow-Colab.git /content/DDSP-SVC-ReFlow-Colab
 %cd /content/DDSP-SVC
+!git rev-parse HEAD
 !python -m pip install -q --upgrade pip
 !python -m pip install -q -r requirements.txt
 !python -m pip install -q -r /content/DDSP-SVC-ReFlow-Colab/requirements-extra.txt
