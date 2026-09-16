@@ -41,6 +41,33 @@ def tail_text(path, lines=80):
     data = p.read_text(errors="replace").splitlines()
     return "\n".join(data[-lines:])
 
+def human_bytes(value):
+    value = float(value)
+    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+        if value < 1024 or unit == "ТБ":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} ТБ"
+
+def directory_size(path):
+    total = 0
+    root = Path(path)
+    if not root.exists():
+        return 0
+    for item in root.rglob("*"):
+        try:
+            if item.is_file() and not item.is_symlink():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+def free_space(path):
+    try:
+        return shutil.disk_usage(Path(path)).free
+    except Exception:
+        return None
+
 def calculate_dataset_fingerprint():
     digests = []
     for folder in ("train/audio", "val/audio"):
@@ -200,6 +227,12 @@ def system_status():
     checkpoints = list(exp_root.glob("*/model_*.pt")) if exp_root.exists() else []
     last_ckpt = max(checkpoints, key=_checkpoint_step) if checkpoints else None
 
+    local_root = Path("/content") if Path("/content").exists() else DDSP_ROOT
+    local_free = free_space(local_root)
+    drive_root = Path("/content/drive/MyDrive/DDSP-SVC-ReFlow")
+    drive_free = free_space(drive_root) if drive_root.exists() else None
+    data_bytes = directory_size(DDSP_ROOT / "data")
+
     parts = [
         f"Папка DDSP-SVC: {DDSP_ROOT}",
         f"Исходники: {'найдены' if root_ok() else 'не найдены'}",
@@ -218,6 +251,9 @@ def system_status():
         ),
         f"Сегмент обучения: {training_segment_duration():.3f} с",
         f"Последний checkpoint: {last_ckpt.name if last_ckpt else 'нет'}",
+        f"Размер persistent data: {human_bytes(data_bytes)}",
+        f"Свободно локально: {human_bytes(local_free) if local_free is not None else 'не удалось определить'}",
+        f"Свободно на Google Drive: {human_bytes(drive_free) if drive_free is not None else 'не удалось определить'}",
     ]
     for p in [
         DDSP_ROOT / "pretrain/contentvec/pytorch_model.bin",
@@ -438,12 +474,27 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
         if cache_ready:
             cache_note = "Локальный кэш уже готов, повторное копирование не нужно."
         else:
+            source_bytes = directory_size(source / "train") + directory_size(source / "val")
+            local_parent = local_data.parent if local_data.parent.exists() else Path("/content")
+            available = free_space(local_parent)
+            reserve = 1024 ** 3
+            required = int(source_bytes * 1.2) + reserve
+            if available is not None and available < required:
+                return (
+                    "Недостаточно локального места для быстрого кэша. "
+                    f"Нужно примерно {human_bytes(required)}, свободно {human_bytes(available)}. "
+                    "Освободи место или выключи «Быстрый локальный кэш для обучения»."
+                )
+
             shutil.rmtree(local_data, ignore_errors=True)
             local_data.mkdir(parents=True, exist_ok=True)
             shutil.copytree(source / "train", local_data / "train")
             shutil.copytree(source / "val", local_data / "val")
             local_fp_file.write_text(dataset_fp + "\n")
-            cache_note = "Признаки скопированы с Drive в быстрый локальный кэш."
+            cache_note = (
+                f"Признаки скопированы с Drive в быстрый локальный кэш "
+                f"({human_bytes(source_bytes)})."
+            )
 
     cfg = make_config(
         batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save,
