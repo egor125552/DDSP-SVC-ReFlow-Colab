@@ -406,7 +406,7 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
     pending_path = _pending_training_path(exp_name)
     pending_path.write_text(json.dumps({
         "dataset_fingerprint": dataset_fp,
-        "start_step": start_step,
+        "origin_step": start_step,
         "resume_from": Path(resume_from).name if resume_from else "",
         "fine_tune": bool(resume_from and previous_fp != dataset_fp),
     }, ensure_ascii=False, indent=2) + "\n")
@@ -526,21 +526,35 @@ def sync_pending_checkpoint_identity(exp_name):
     try:
         pending = json.loads(pending_path.read_text(errors="replace"))
         dataset_fp = str(pending.get("dataset_fingerprint", "")).strip()
-        start_step = int(pending.get("start_step", -1))
+        origin_step = int(pending.get("origin_step", pending.get("start_step", -1)))
     except Exception:
         return ""
 
-    latest = latest_checkpoint(exp_name)
-    if not latest:
-        return ""
-    latest_step = _checkpoint_step(latest)
-    if not dataset_fp or latest_step <= start_step:
+    exp_dir = DDSP_ROOT / "exp" / exp_name
+    checkpoints = sorted(exp_dir.glob("model_*.pt"), key=_checkpoint_step)
+    if not dataset_fp or not checkpoints:
         return ""
 
-    sidecar = _checkpoint_dataset_sidecar(latest)
-    sidecar.write_text(dataset_fp + "\n")
-    pending["start_step"] = latest_step
-    pending["last_checkpoint"] = Path(latest).name
+    labeled = []
+    for checkpoint in checkpoints:
+        step = _checkpoint_step(checkpoint)
+        if step <= origin_step:
+            continue
+        sidecar = _checkpoint_dataset_sidecar(checkpoint)
+        existing_fp = checkpoint_dataset_fingerprint(checkpoint)
+        if existing_fp and existing_fp != dataset_fp:
+            continue
+        if not existing_fp:
+            sidecar.write_text(dataset_fp + "\n")
+        labeled.append(checkpoint)
+
+    if not labeled:
+        return ""
+
+    latest = max(labeled, key=_checkpoint_step)
+    pending["origin_step"] = origin_step
+    pending["last_labeled_step"] = _checkpoint_step(latest)
+    pending["last_checkpoint"] = latest.name
     pending_path.write_text(json.dumps(pending, ensure_ascii=False, indent=2) + "\n")
     return str(latest)
 
