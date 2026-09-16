@@ -80,6 +80,63 @@ def training_segment_duration():
     shortest = min(durations)
     return round(max(0.25, min(2.0, shortest - 0.05)), 3)
 
+def preprocessing_integrity():
+    required_features = ("f0", "volume", "aug_vol", "mel", "aug_mel", "units")
+    total = 0
+    complete = 0
+    problems = []
+
+    for split in ("train", "val"):
+        root = DDSP_ROOT / "data" / split
+        audio_dir = root / "audio"
+        wavs = sorted(audio_dir.glob("*.wav"))
+        total += len(wavs)
+
+        pitch_dict = {}
+        pitch_path = root / "pitch_aug_dict.npy"
+        if pitch_path.exists():
+            try:
+                loaded = np.load(pitch_path, allow_pickle=True)
+                pitch_dict = loaded.item() if getattr(loaded, "shape", None) == () else {}
+                if not isinstance(pitch_dict, dict):
+                    pitch_dict = {}
+            except Exception as exc:
+                problems.append(f"{split}/pitch_aug_dict.npy повреждён: {exc}")
+        elif wavs:
+            problems.append(f"{split}/pitch_aug_dict.npy отсутствует")
+
+        for wav in wavs:
+            name_ext = wav.name
+            file_ok = True
+            for feature in required_features:
+                path = root / feature / f"{name_ext}.npy"
+                if not path.exists():
+                    problems.append(f"{split}/{feature}/{name_ext}.npy отсутствует")
+                    file_ok = False
+                    continue
+                try:
+                    arr = np.load(path, mmap_mode="r")
+                    if getattr(arr, "size", 0) <= 0 or getattr(arr, "ndim", 0) <= 0:
+                        raise ValueError("пустой массив")
+                except Exception as exc:
+                    problems.append(f"{split}/{feature}/{name_ext}.npy повреждён: {exc}")
+                    file_ok = False
+
+            if name_ext not in pitch_dict:
+                problems.append(f"{split}/pitch_aug_dict.npy не содержит {name_ext}")
+                file_ok = False
+
+            if file_ok:
+                complete += 1
+
+    ready = total > 0 and complete == total and not problems
+    return {
+        "ready": ready,
+        "total": total,
+        "complete": complete,
+        "problems": problems,
+    }
+
 def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab", epochs=100000, interval_val=2000, interval_force_save=10000, fast_local_data=False, save_optimizer=True):
     src = DDSP_ROOT / "configs" / "reflow.yaml"
     dst = DDSP_ROOT / "configs" / "reflow-colab.yaml"
@@ -111,10 +168,7 @@ def system_status():
     train_wavs = len(list((DDSP_ROOT / "data/train/audio").glob("*.wav")))
     val_wavs = len(list((DDSP_ROOT / "data/val/audio").glob("*.wav")))
     dataset_fp = current_dataset_fingerprint()
-    preprocess_ready = (
-        (DDSP_ROOT / "data/train/pitch_aug_dict.npy").exists()
-        and (DDSP_ROOT / "data/val/pitch_aug_dict.npy").exists()
-    )
+    integrity = preprocessing_integrity()
     exp_root = DDSP_ROOT / "exp"
     checkpoints = list(exp_root.glob("*/model_*.pt")) if exp_root.exists() else []
     last_ckpt = max(checkpoints, key=_checkpoint_step) if checkpoints else None
@@ -126,7 +180,11 @@ def system_status():
         f"GPU: {gpu}",
         f"Датасет: train {train_wavs} WAV, val {val_wavs} WAV",
         f"Датасет ID: {dataset_fp[:12] if dataset_fp else 'нет'}",
-        f"Preprocessing: {'готов' if preprocess_ready else 'не готов'}",
+        (
+            f"Preprocessing: готов, {integrity['complete']}/{integrity['total']} файлов"
+            if integrity["ready"]
+            else f"Preprocessing: не готов, {integrity['complete']}/{integrity['total']} файлов полностью подготовлено"
+        ),
         f"Сегмент обучения: {training_segment_duration():.3f} с",
         f"Последний checkpoint: {last_ckpt.name if last_ckpt else 'нет'}",
     ]
@@ -257,12 +315,15 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
         return "Обучение уже идёт."
 
     source = DDSP_ROOT / "data"
-    preprocess_ready = (
-        (source / "train/pitch_aug_dict.npy").exists()
-        and (source / "val/pitch_aug_dict.npy").exists()
-    )
-    if not preprocess_ready:
-        return "Сначала нажми «Подготовить признаки». Готовый preprocessing не найден."
+    integrity = preprocessing_integrity()
+    if not integrity["ready"]:
+        details = integrity["problems"][:3]
+        suffix = f" Первые проблемы: {'; '.join(details)}" if details else ""
+        return (
+            "Сначала нажми «Подготовить признаки». "
+            f"Полностью подготовлено {integrity['complete']} из {integrity['total']} файлов."
+            f"{suffix}"
+        )
 
     dataset_fp = current_dataset_fingerprint()
     if not dataset_fp:
