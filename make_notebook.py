@@ -78,7 +78,29 @@ vram = torch.cuda.get_device_properties(0).total_memory / 2**30
 print('GPU smoke test')
 print('GPU:', gpu)
 print('VRAM, ГБ:', round(vram, 1))
+print('Python:', '.'.join(map(str, __import__('sys').version_info[:3])))
+print('PyTorch:', torch.__version__)
 print('CUDA:', torch.version.cuda)
+
+tested = {
+    'python_major_minor': (3, 12),
+    'torch_prefix': '2.11.',
+    'cuda_prefix': '12.8',
+}
+import sys
+runtime_warnings = []
+if sys.version_info[:2] != tested['python_major_minor']:
+    runtime_warnings.append(f"Python {sys.version_info.major}.{sys.version_info.minor}, тестировался Python 3.12")
+if not str(torch.__version__).startswith(tested['torch_prefix']):
+    runtime_warnings.append(f"PyTorch {torch.__version__}, тестировался PyTorch 2.11.x")
+if not str(torch.version.cuda).startswith(tested['cuda_prefix']):
+    runtime_warnings.append(f"CUDA {torch.version.cuda}, тестировалась CUDA 12.8")
+if runtime_warnings:
+    print('ПРЕДУПРЕЖДЕНИЕ: Colab runtime отличается от протестированного:')
+    for item in runtime_warnings:
+        print(' -', item)
+else:
+    print('Версии runtime совпадают с протестированной линией.')
 
 # Быстрый реальный CUDA тест
 x = torch.randn(1024, 1024, device='cuda', dtype=torch.float16)
