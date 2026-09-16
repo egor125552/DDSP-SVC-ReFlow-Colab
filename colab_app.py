@@ -97,9 +97,8 @@ def prepare_dataset(zip_path, validation_count):
     data_root = DDSP_ROOT / "data"
     train_root = data_root / "train"
     val_root = data_root / "val"
-    train_dir = train_root / "audio"
-    val_dir = val_root / "audio"
     tmp = Path(tempfile.mkdtemp(prefix="ddsp_dataset_"))
+    stage = Path(tempfile.mkdtemp(prefix="ddsp_stage_"))
 
     try:
         try:
@@ -116,26 +115,50 @@ def prepare_dataset(zip_path, validation_count):
         if len(wavs) < 3:
             return "Нужно хотя бы 3 WAV файла. Старый датасет не изменён."
 
-        # Новый датасет обязан получить новый preprocessing. Удаляем не только audio,
-        # но и старые f0/mel/units/volume, чтобы признаки разных датасетов не смешивались.
+        prepared = []
+        skipped = []
+        for src in wavs:
+            try:
+                audio, _ = librosa.load(src, sr=44100, mono=True)
+                if audio is None or len(audio) == 0:
+                    raise ValueError("пустой аудиофайл")
+                out = stage / f"{len(prepared):05d}.wav"
+                sf.write(out, audio, 44100)
+                prepared.append(out)
+            except Exception as exc:
+                skipped.append((src.name, str(exc)))
+
+        if len(prepared) < 3:
+            return (
+                f"После проверки осталось только {len(prepared)} исправных WAV из {len(wavs)}. "
+                "Нужно хотя бы 3. Старый датасет не изменён."
+            )
+
+        n_val = max(1, min(int(validation_count), len(prepared) // 5))
+        new_train = stage / "final_train"
+        new_val = stage / "final_val"
+        (new_train / "audio").mkdir(parents=True, exist_ok=True)
+        (new_val / "audio").mkdir(parents=True, exist_ok=True)
+
+        for idx, src in enumerate(prepared):
+            target_dir = new_val / "audio" if idx < n_val else new_train / "audio"
+            shutil.copy2(src, target_dir / f"{idx:05d}.wav")
+
+        # Commit: persistent data меняем только после успешной подготовки staging.
         shutil.rmtree(train_root, ignore_errors=True)
         shutil.rmtree(val_root, ignore_errors=True)
-        train_dir.mkdir(parents=True, exist_ok=True)
-        val_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(new_train, train_root)
+        shutil.copytree(new_val, val_root)
 
-        n_val = max(1, min(int(validation_count), len(wavs) // 5))
-        for idx, src in enumerate(wavs):
-            audio, _ = librosa.load(src, sr=44100, mono=True)
-            target_dir = val_dir if idx < n_val else train_dir
-            sf.write(target_dir / f"{idx:05d}.wav", audio, 44100)
-
+        skipped_note = f" Пропущено битых WAV: {len(skipped)}." if skipped else ""
         return (
-            f"Готово. Обучение: {len(wavs)-n_val} файлов. Проверка: {n_val}. "
-            "Все приведено к 44,1 кГц mono. Старые признаки очищены, "
+            f"Готово. Обучение: {len(prepared)-n_val} файлов. Проверка: {n_val}. "
+            f"Все приведено к 44,1 кГц mono.{skipped_note} Старые признаки очищены, "
             "теперь нажми «Подготовить признаки»."
         )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(stage, ignore_errors=True)
 
 def run_preprocess(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save):
     cfg = make_config(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save)
