@@ -37,6 +37,30 @@ def tail_text(path, lines=80):
     data = p.read_text(errors="replace").splitlines()
     return "\n".join(data[-lines:])
 
+def calculate_dataset_fingerprint():
+    digests = []
+    for folder in ("train/audio", "val/audio"):
+        for path in sorted((DDSP_ROOT / "data" / folder).glob("*.wav")):
+            try:
+                digests.append(hashlib.sha256(path.read_bytes()).hexdigest())
+            except OSError:
+                continue
+    if not digests:
+        return ""
+    return hashlib.sha256("\n".join(sorted(digests)).encode("utf-8")).hexdigest()
+
+def current_dataset_fingerprint():
+    marker = DDSP_ROOT / "data/dataset_fingerprint.txt"
+    if marker.exists():
+        value = marker.read_text(errors="replace").strip()
+        if value:
+            return value
+    value = calculate_dataset_fingerprint()
+    if value:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(value + "\n")
+    return value
+
 def training_segment_duration():
     wavs = list((DDSP_ROOT / "data/train/audio").glob("*.wav"))
     wavs += list((DDSP_ROOT / "data/val/audio").glob("*.wav"))
@@ -83,6 +107,7 @@ def system_status():
         gpu = f"{torch.cuda.get_device_name(0)}, VRAM {torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} ГБ"
     train_wavs = len(list((DDSP_ROOT / "data/train/audio").glob("*.wav")))
     val_wavs = len(list((DDSP_ROOT / "data/val/audio").glob("*.wav")))
+    dataset_fp = current_dataset_fingerprint()
     preprocess_ready = (
         (DDSP_ROOT / "data/train/pitch_aug_dict.npy").exists()
         and (DDSP_ROOT / "data/val/pitch_aug_dict.npy").exists()
@@ -97,6 +122,7 @@ def system_status():
         f"PyTorch: {torch.__version__}",
         f"GPU: {gpu}",
         f"Датасет: train {train_wavs} WAV, val {val_wavs} WAV",
+        f"Датасет ID: {dataset_fp[:12] if dataset_fp else 'нет'}",
         f"Preprocessing: {'готов' if preprocess_ready else 'не готов'}",
         f"Сегмент обучения: {training_segment_duration():.3f} с",
         f"Последний checkpoint: {last_ckpt.name if last_ckpt else 'нет'}",
@@ -186,6 +212,9 @@ def prepare_dataset(zip_path, validation_count):
         shutil.rmtree(val_root, ignore_errors=True)
         shutil.copytree(new_train, train_root)
         shutil.copytree(new_val, val_root)
+        dataset_fingerprint = calculate_dataset_fingerprint()
+        if dataset_fingerprint:
+            (data_root / "dataset_fingerprint.txt").write_text(dataset_fingerprint + "\n")
 
         skipped_notes = []
         if skipped_broken:
@@ -215,7 +244,7 @@ def run_preprocess(batch_size, cache_all, exp_name, epochs, interval_val, interv
         raise gr.Error("Preprocessing завершился с ошибкой.\n" + output[-5000:])
     return output
 
-def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save, fast_local_data, save_optimizer):
+def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save, fast_local_data, save_optimizer, allow_dataset_change):
     global TRAIN_PROCESS, TRAIN_LOG
     if TRAIN_PROCESS is not None and TRAIN_PROCESS.poll() is None:
         return "Обучение уже идёт."
@@ -228,7 +257,29 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
     if not preprocess_ready:
         return "Сначала нажми «Подготовить признаки». Готовый preprocessing не найден."
 
+    dataset_fp = current_dataset_fingerprint()
+    if not dataset_fp:
+        return "Не удалось определить fingerprint датасета. Подготовь датасет заново."
+
     resume_from = latest_checkpoint(exp_name)
+    exp_dir = DDSP_ROOT / "exp" / exp_name
+    exp_fp_file = exp_dir / "dataset_fingerprint.txt"
+    previous_fp = exp_fp_file.read_text(errors="replace").strip() if exp_fp_file.exists() else ""
+
+    if resume_from and previous_fp != dataset_fp and not allow_dataset_change:
+        reason = (
+            "у checkpoint нет сохранённого Dataset ID"
+            if not previous_fp
+            else f"Dataset ID checkpoint: {previous_fp[:12]}, текущий: {dataset_fp[:12]}"
+        )
+        return (
+            "Остановлено: найден checkpoint от другого или неизвестного датасета. "
+            f"{reason}. Используй другое имя эксперимента или включи "
+            "«Разрешить fine-tune на другом датасете»."
+        )
+
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    exp_fp_file.write_text(dataset_fp + "\n")
 
     if fast_local_data:
         local_data = Path(os.environ.get("DDSP_LOCAL_DATA", "/content/ddsp-local-data")).resolve()
@@ -254,7 +305,12 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
         text=True,
     )
     if resume_from:
-        resume_note = f"Продолжаем с {Path(resume_from).name}."
+        if previous_fp and previous_fp != dataset_fp:
+            resume_note = f"Fine-tune с {Path(resume_from).name} на новом датасете."
+        elif not previous_fp:
+            resume_note = f"Продолжаем legacy checkpoint {Path(resume_from).name}; Dataset ID раньше не сохранялся."
+        else:
+            resume_note = f"Продолжаем с {Path(resume_from).name}."
     else:
         resume_note = "Готового чекпойнта нет, начинаем с нуля."
     optimizer_note = "Состояние optimizer сохраняется." if save_optimizer else "Optimizer не сохраняется."
@@ -449,9 +505,13 @@ with gr.Blocks(title="DDSP-SVC ReFlow для Google Colab") as demo:
             value=True,
             label="Сохранять optimizer для полноценного продолжения обучения после новой сессии",
         )
+        allow_dataset_change = gr.Checkbox(
+            value=False,
+            label="Разрешить fine-tune существующего checkpoint на другом датасете",
+        )
         train_log = gr.Textbox(label="Журнал", lines=18)
         preprocess_inputs = [batch, cache, exp_name, epochs, interval_val, interval_force_save]
-        training_inputs = preprocess_inputs + [fast_local_data, save_optimizer]
+        training_inputs = preprocess_inputs + [fast_local_data, save_optimizer, allow_dataset_change]
         gr.Button("Подготовить признаки").click(run_preprocess, preprocess_inputs, train_log)
         gr.Button("Запустить обучение").click(start_training, training_inputs, train_log)
         gr.Button("Показать статус").click(training_status, outputs=train_log)
