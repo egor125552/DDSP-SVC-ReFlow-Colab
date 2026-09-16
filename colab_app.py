@@ -62,11 +62,24 @@ def system_status():
     gpu = "CUDA недоступна"
     if torch.cuda.is_available():
         gpu = f"{torch.cuda.get_device_name(0)}, VRAM {torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} ГБ"
+    train_wavs = len(list((DDSP_ROOT / "data/train/audio").glob("*.wav")))
+    val_wavs = len(list((DDSP_ROOT / "data/val/audio").glob("*.wav")))
+    preprocess_ready = (
+        (DDSP_ROOT / "data/train/pitch_aug_dict.npy").exists()
+        and (DDSP_ROOT / "data/val/pitch_aug_dict.npy").exists()
+    )
+    exp_root = DDSP_ROOT / "exp"
+    checkpoints = list(exp_root.glob("*/model_*.pt")) if exp_root.exists() else []
+    last_ckpt = max(checkpoints, key=_checkpoint_step) if checkpoints else None
+
     parts = [
         f"Папка DDSP-SVC: {DDSP_ROOT}",
         f"Исходники: {'найдены' if root_ok() else 'не найдены'}",
         f"PyTorch: {torch.__version__}",
         f"GPU: {gpu}",
+        f"Датасет: train {train_wavs} WAV, val {val_wavs} WAV",
+        f"Preprocessing: {'готов' if preprocess_ready else 'не готов'}",
+        f"Последний checkpoint: {last_ckpt.name if last_ckpt else 'нет'}",
     ]
     for p in [
         DDSP_ROOT / "pretrain/contentvec/pytorch_model.bin",
