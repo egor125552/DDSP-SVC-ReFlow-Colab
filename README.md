@@ -34,9 +34,19 @@
 
 Сам realtime обработчик проверен на Linux и выдаёт корректный поток 44,1 кГц. Настоящий микрофон браузера и реальная задержка на Tesla T4 требуют проверки уже в запущенном Colab. Python gradio_client 2.7 имеет отдельную проблему со streaming endpoint, поэтому для realtime ориентируйся на браузерный интерфейс, а не на gradio_client.
 
+## Проверено на официальном Google Colab runtime
+
+16 сентября 2026 года полный smoke test был прогнан внутри официального образа Google `us-docker.pkg.dev/colab-images/public/runtime:latest`, digest `sha256:c4375de125f45948a10009001df52774da2573ea7bb2903f8bf945ec72690c5a`. В образе были Python 3.12.13, PyTorch 2.11.0+cu128 и CUDA runtime 12.8.
+
+На сервере нет физической NVIDIA GPU, поэтому CUDA-вычисление и RMVPE на настоящей T4 этим тестом не покрыты. При этом в официальном Colab image через русский Gradio реально прошли: загрузка ZIP, разбиение train/val, приведение WAV к 44,1 кГц mono, preprocessing через ContentVec, два шага ReFlow-обучения, validation, сохранение `model_2.pt`, поиск чекпойнта, обычный inference до WAV и прямой realtime inference. На CPU preprocessing и inference автоматически используют Parselmouth; при CUDA остаётся RMVPE.
+
+Чекпойнт был сохранён через симлинк `/content/DDSP-SVC/exp` в смонтированный `/content/drive/MyDrive/DDSP-SVC-ReFlow/exp`, то есть проверена и схема сохранения в Google Drive. Тестовый `model_2.pt` имел размер 219734203 байта.
+
+Установка исходного `requirements.txt` DDSP-SVC понижает NumPy до 1.26.4, из-за чего pip сообщает конфликты с некоторыми посторонними пакетами, уже лежащими в Colab image. На проверенный DDSP-SVC/Gradio workflow это не повлияло.
+
 ## Проверено на Linux
 
-В CPU Docker smoke test реально прошли установка зависимостей, подготовка датасета, preprocessing, два шага обучения, сохранение чекпойнта, повторная загрузка модели, обычный inference до WAV и прямой вызов realtime обработчика. Для CPU автоматически используется parselmouth, а на CUDA остаётся RMVPE.
+В отдельном CPU Docker smoke test также прошли установка зависимостей, подготовка датасета, preprocessing, два шага обучения, сохранение чекпойнта, повторная загрузка модели, обычный inference до WAV и прямой вызов realtime обработчика. Для CPU автоматически используется Parselmouth, а на CUDA остаётся RMVPE.
 
 ## Docker smoke test
 
