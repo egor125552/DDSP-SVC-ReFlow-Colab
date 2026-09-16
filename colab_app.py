@@ -733,6 +733,125 @@ def inspect_checkpoint(model_path):
         f"Optimizer: {'есть, полноценный resume' if has_optimizer else 'нет, продолжатся только веса и шаг'}",
     ])
 
+def run_grader(exp_name):
+    checks = []
+
+    def add(status, name, detail):
+        checks.append((status, name, detail))
+
+    add("OK" if root_ok() else "ПРОБЛЕМА", "Исходники DDSP-SVC",
+        str(DDSP_ROOT) if root_ok() else "train_reflow.py не найден")
+
+    if torch.cuda.is_available():
+        add("OK", "GPU/CUDA", f"{torch.cuda.get_device_name(0)}, CUDA {torch.version.cuda}")
+    else:
+        add("ПРОБЛЕМА", "GPU/CUDA", "CUDA недоступна. Для Colab выбери GPU runtime.")
+
+    pretrained = [
+        ("ContentVec", DDSP_ROOT / "pretrain/contentvec/pytorch_model.bin"),
+        ("HiFiGAN model", DDSP_ROOT / "pretrain/nsf_hifigan/model"),
+        ("HiFiGAN config", DDSP_ROOT / "pretrain/nsf_hifigan/config.json"),
+        ("RMVPE", DDSP_ROOT / "pretrain/rmvpe/model.pt"),
+    ]
+    missing = [name for name, path in pretrained if not path.exists() or path.stat().st_size <= 0]
+    add("OK" if not missing else "ПРОБЛЕМА", "Предобученные модели",
+        "все найдены" if not missing else "нет или пустые: " + ", ".join(missing))
+
+    train_wavs = len(list((DDSP_ROOT / "data/train/audio").glob("*.wav")))
+    val_wavs = len(list((DDSP_ROOT / "data/val/audio").glob("*.wav")))
+    dataset_ok = train_wavs > 0 and val_wavs > 0
+    add("OK" if dataset_ok else "ПРОБЛЕМА", "Датасет",
+        f"train {train_wavs}, val {val_wavs}")
+
+    dataset_fp = current_dataset_fingerprint()
+    add("OK" if dataset_fp else "ПРОБЛЕМА", "Dataset ID",
+        dataset_fp[:12] if dataset_fp else "не найден")
+
+    integrity = preprocessing_integrity()
+    if integrity["ready"]:
+        add("OK", "Целостность preprocessing",
+            f"{integrity['complete']}/{integrity['total']} файлов готовы")
+    else:
+        detail = f"{integrity['complete']}/{integrity['total']} файлов готовы"
+        if integrity["problems"]:
+            detail += "; " + "; ".join(integrity["problems"][:2])
+        add("ПРОБЛЕМА", "Целостность preprocessing", detail)
+
+    try:
+        source_cfg = yaml.safe_load((DDSP_ROOT / "configs/reflow.yaml").read_text())
+        source_cfg["data"]["f0_extractor"] = "rmvpe" if torch.cuda.is_available() else "parselmouth"
+        expected_manifest = preprocessing_manifest_for_config(source_cfg)
+        manifest = read_preprocessing_manifest()
+        manifest_ok = manifest == expected_manifest
+        add("OK" if manifest_ok else "ПРОБЛЕМА", "Manifest preprocessing",
+            "соответствует текущей среде" if manifest_ok else "отсутствует или параметры изменились")
+    except Exception as exc:
+        add("ПРОБЛЕМА", "Manifest preprocessing", f"не удалось проверить: {exc}")
+
+    data_bytes = directory_size(DDSP_ROOT / "data")
+    local_root = Path("/content") if Path("/content").exists() else DDSP_ROOT
+    local_free = free_space(local_root)
+    required_local = int(data_bytes * 1.2) + 1024 ** 3
+    if local_free is None:
+        add("ПРЕДУПРЕЖДЕНИЕ", "Локальное место", "не удалось определить")
+    else:
+        add("OK" if local_free >= required_local else "ПРОБЛЕМА", "Локальное место",
+            f"свободно {human_bytes(local_free)}, для быстрого кэша желательно {human_bytes(required_local)}")
+
+    try:
+        exp_name = validate_exp_name(exp_name)
+    except ValueError as exc:
+        add("ПРОБЛЕМА", "Имя эксперимента", str(exc))
+        exp_name = ""
+
+    checkpoint = latest_checkpoint(exp_name) if exp_name else ""
+    if not checkpoint:
+        add("ПРЕДУПРЕЖДЕНИЕ", "Checkpoint", "ещё нет")
+    else:
+        path = Path(checkpoint)
+        try:
+            ckpt = torch.load(path, map_location="cpu", weights_only=False)
+            if not isinstance(ckpt, dict) or "model" not in ckpt or "global_step" not in ckpt:
+                raise ValueError("нет обязательных ключей model/global_step")
+            step = ckpt.get("global_step")
+            has_optimizer = ckpt.get("optimizer") is not None
+            add("OK", "Checkpoint",
+                f"{path.name}, шаг {step}, {human_bytes(path.stat().st_size)}")
+            add("OK" if has_optimizer else "ПРЕДУПРЕЖДЕНИЕ", "Optimizer checkpoint",
+                "сохранён" if has_optimizer else "не сохранён, resume будет неполным")
+
+            checkpoint_fp = checkpoint_dataset_fingerprint(path)
+            if dataset_fp and checkpoint_fp == dataset_fp:
+                add("OK", "Dataset ID checkpoint", checkpoint_fp[:12])
+            elif not checkpoint_fp:
+                add("ПРЕДУПРЕЖДЕНИЕ", "Dataset ID checkpoint",
+                    "неизвестен; для legacy checkpoint используй явную привязку")
+            else:
+                add("ПРОБЛЕМА", "Dataset ID checkpoint",
+                    f"checkpoint {checkpoint_fp[:12]}, текущий {dataset_fp[:12] if dataset_fp else 'нет'}")
+        except Exception as exc:
+            add("ПРОБЛЕМА", "Checkpoint", f"не удалось прочитать {path.name}: {exc}")
+
+    pending = _pending_training_path(exp_name) if exp_name else None
+    if pending and pending.exists() and not training_is_running():
+        add("ПРЕДУПРЕЖДЕНИЕ", "Pending training",
+            "найден незавершённый pending_dataset.json; он будет синхронизирован при следующем старте/статусе")
+    else:
+        add("OK", "Pending training", "активного stale pending нет")
+
+    problems = sum(1 for status, _, _ in checks if status == "ПРОБЛЕМА")
+    warnings = sum(1 for status, _, _ in checks if status == "ПРЕДУПРЕЖДЕНИЕ")
+    if problems:
+        verdict = f"Итог: есть проблемы ({problems}), предупреждений {warnings}."
+    elif warnings:
+        verdict = f"Итог: критических проблем нет, предупреждений {warnings}."
+    else:
+        verdict = "Итог: все проверки пройдены."
+
+    lines = [verdict, ""]
+    lines.extend(f"[{status}] {name}: {detail}" for status, name, detail in checks)
+    return "\n".join(lines)
+
 def bind_legacy_checkpoint_to_current_dataset(model_path):
     if training_is_running():
         return "Сначала останови обучение."
@@ -929,6 +1048,14 @@ with gr.Blocks(title="DDSP-SVC ReFlow для Google Colab") as demo:
             last_ckpt,
             ckpt_info,
         )
+    with gr.Tab("Грейдер"):
+        gr.Markdown(
+            "Проверяет готовность текущей среды, датасета, preprocessing и выбранного эксперимента. "
+            "Числового рейтинга нет: каждая проблема показывается отдельно."
+        )
+        grader_exp_name = gr.Textbox(value="reflow-colab", label="Имя эксперимента для проверки")
+        grader_output = gr.Textbox(label="Результат грейдера", lines=22)
+        gr.Button("Запустить грейдер").click(run_grader, grader_exp_name, grader_output)
     with gr.Tab("Генерация"):
         input_audio = gr.Audio(label="Исходный голос", type="filepath")
         model_path = gr.Textbox(label="Путь к model_*.pt", placeholder="/content/drive/MyDrive/...")
