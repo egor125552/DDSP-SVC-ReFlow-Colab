@@ -168,10 +168,40 @@ def stop_training():
         TRAIN_PROCESS.kill()
     return "Обучение остановлено. Чекпойнты, которые успели сохраниться, не удалены."
 
+def _checkpoint_step(path):
+    try:
+        return int(Path(path).stem.rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return -1
+
 def latest_checkpoint(exp_name):
     exp = DDSP_ROOT / "exp" / exp_name
-    pts = sorted(exp.glob("model_*.pt"), key=lambda p: p.stat().st_mtime if p.exists() else 0)
-    return str(pts[-1]) if pts else ""
+    pts = list(exp.glob("model_*.pt"))
+    return str(max(pts, key=_checkpoint_step)) if pts else ""
+
+def inspect_checkpoint(model_path):
+    if not model_path:
+        return "Чекпойнт не выбран."
+    path = Path(model_path).expanduser()
+    if not path.exists():
+        return f"Файл не найден: {path}"
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        return f"Не удалось прочитать checkpoint: {exc}"
+    if not isinstance(ckpt, dict):
+        return f"Неожиданный формат checkpoint: {type(ckpt).__name__}"
+    step = ckpt.get("global_step", "не указан")
+    has_model = "model" in ckpt
+    has_optimizer = ckpt.get("optimizer") is not None
+    size_mb = path.stat().st_size / 2**20
+    return "\n".join([
+        f"Файл: {path}",
+        f"Шаг: {step}",
+        f"Размер: {size_mb:.1f} МБ",
+        f"Веса модели: {'есть' if has_model else 'нет'}",
+        f"Optimizer: {'есть, полноценный resume' if has_optimizer else 'нет, продолжатся только веса и шаг'}",
+    ])
 
 def do_inference(input_audio, model_path, key, formant, threshold, steps, method, t_start):
     if not input_audio:
@@ -315,7 +345,9 @@ with gr.Blocks(title="DDSP-SVC ReFlow для Google Colab") as demo:
         gr.Button("Показать статус").click(training_status, outputs=train_log)
         gr.Button("Остановить обучение").click(stop_training, outputs=train_log)
         last_ckpt = gr.Textbox(label="Последний чекпойнт")
+        ckpt_info = gr.Textbox(label="Проверка checkpoint", lines=6)
         gr.Button("Найти последний чекпойнт").click(latest_checkpoint, exp_name, last_ckpt)
+        gr.Button("Проверить checkpoint").click(inspect_checkpoint, last_ckpt, ckpt_info)
     with gr.Tab("Генерация"):
         input_audio = gr.Audio(label="Исходный голос", type="filepath")
         model_path = gr.Textbox(label="Путь к model_*.pt", placeholder="/content/drive/MyDrive/...")
