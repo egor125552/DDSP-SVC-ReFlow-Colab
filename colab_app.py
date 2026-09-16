@@ -436,7 +436,7 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
 
     exp_dir = DDSP_ROOT / "exp" / exp_name
     exp_dir.mkdir(parents=True, exist_ok=True)
-    sync_pending_checkpoint_identity(exp_name)
+    finalize_pending_training(exp_name)
     resume_from = latest_checkpoint(exp_name)
     previous_fp = checkpoint_dataset_fingerprint(resume_from)
 
@@ -538,7 +538,12 @@ def training_status():
     exp_root = DDSP_ROOT / "exp"
     if exp_root.exists():
         for pending in exp_root.glob("*/pending_dataset.json"):
-            sync_pending_checkpoint_identity(pending.parent.name)
+            exp_name = pending.parent.name
+            if training_is_running():
+                sync_pending_checkpoint_identity(exp_name)
+                cleanup_checkpoint_metadata(exp_name)
+            else:
+                finalize_pending_training(exp_name)
 
     log = tail_text(TRAIN_LOG) if TRAIN_LOG else "Журнал пока пуст."
     return f"Состояние: {state}\n\n{log}"
@@ -556,7 +561,7 @@ def stop_training():
     exp_root = DDSP_ROOT / "exp"
     if exp_root.exists():
         for pending in exp_root.glob("*/pending_dataset.json"):
-            sync_pending_checkpoint_identity(pending.parent.name)
+            finalize_pending_training(pending.parent.name)
 
     return "Обучение остановлено. Чекпойнты, которые успели сохраниться, не удалены."
 
@@ -583,6 +588,34 @@ def checkpoint_dataset_fingerprint(path):
 
 def _pending_training_path(exp_name):
     return DDSP_ROOT / "exp" / exp_name / "pending_dataset.json"
+
+def cleanup_checkpoint_metadata(exp_name):
+    exp_dir = DDSP_ROOT / "exp" / exp_name
+    if not exp_dir.exists():
+        return 0
+    removed = 0
+    suffix = ".dataset_fingerprint.txt"
+    for sidecar in exp_dir.glob(f"model_*.pt{suffix}"):
+        checkpoint = Path(str(sidecar)[:-len(suffix)])
+        if not checkpoint.exists():
+            try:
+                sidecar.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+def finalize_pending_training(exp_name):
+    sync_pending_checkpoint_identity(exp_name)
+    cleanup_checkpoint_metadata(exp_name)
+    pending_path = _pending_training_path(exp_name)
+    if pending_path.exists():
+        try:
+            pending_path.unlink()
+            return True
+        except OSError:
+            return False
+    return False
 
 def sync_pending_checkpoint_identity(exp_name):
     pending_path = _pending_training_path(exp_name)
