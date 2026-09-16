@@ -1,101 +1,270 @@
 # DDSP-SVC ReFlow Colab
 
-Готовый Google Colab набор для актуального DDSP-SVC ReFlow.
+A reproducible Google Colab workflow for DDSP-SVC ReFlow with dataset preparation, preprocessing, training, checkpoint resume, inference, experimental browser realtime, Google Drive persistence, validation tooling, and Docker smoke tests.
 
-Что внутри:
+The project is designed around one practical problem: Colab sessions are temporary, GPU environments change, datasets can be broken, and a failed training run should not silently corrupt the state you want to resume later.
 
-- русский Gradio интерфейс;
-- подготовка ZIP датасета и приведение WAV к 44,1 кГц mono;
+## What is included
+
+- Russian Gradio interface;
+- ZIP dataset import;
+- WAV normalization to 44.1 kHz mono;
+- deterministic train/validation split;
+- preprocessing with ContentVec and F0 extraction;
+- configurable training;
+- checkpoint discovery and resume;
+- WAV inference;
+- experimental browser realtime through Gradio;
+- Google Drive persistence for datasets, extracted features, and checkpoints;
+- fast local training cache;
+- dataset quality analysis;
+- Dataset ID tracking;
+- preprocessing integrity validation;
+- checkpoint-to-dataset binding;
+- system grader for environment and training readiness;
+- CPU Docker smoke test;
+- validation against the official Google Colab runtime image.
+
+## Open in Google Colab
+
+https://colab.research.google.com/github/egor125552/DDSP-SVC-ReFlow-Colab/blob/main/DDSP_SVC_ReFlow_Colab.ipynb
+
+Use a GPU runtime for real training.
+
+The interface starts conservatively on Tesla T4. If VRAM allows it, batch size can be increased. If CUDA runs out of memory, reduce the batch size.
+
+Before the UI starts, the notebook checks CUDA availability, GPU model, VRAM, a short FP16 computation, and RMVPE loading. If Colab provides only CPU, the workflow stops with a clear message instead of accidentally starting extremely slow training.
+
+## Reproducibility
+
+The upstream DDSP-SVC source is pinned to a known commit:
+
+`3635301027473c6662d05a1c73ef34fba7f15f90`
+
+The Colab notebook and Docker smoke test use the same upstream revision.
+
+This prevents a future upstream change from silently breaking preprocessing or checkpoint compatibility.
+
+Updating the upstream revision should be treated as an explicit change followed by a complete smoke test.
+
+## Verified Colab environment
+
+A full smoke test was run on September 16, 2026 inside the official Google Colab runtime image:
+
+`us-docker.pkg.dev/colab-images/public/runtime:latest`
+
+Verified image digest:
+
+`sha256:c4375de125f45948a10009001df52774da2573ea7bb2903f8bf945ec72690c5a`
+
+The tested environment included:
+
+- Python 3.12.13;
+- PyTorch 2.11.0+cu128;
+- CUDA runtime 12.8.
+
+The server used for this verification did not have a physical NVIDIA GPU, so CUDA execution on an actual T4 was not covered by that specific test.
+
+Inside the official Colab image, the following workflow was exercised through the project UI:
+
+- ZIP import;
+- train/validation split;
+- WAV normalization;
 - preprocessing;
-- запуск и остановка обучения;
-- настройка batch size, количества эпох и интервалов чекпойнтов;
-- просмотр журнала обучения;
-- поиск последнего чекпойнта;
-- обычное преобразование WAV;
-- экспериментальный realtime из микрофона браузера;
-- сохранение папок exp и data в Google Drive: чекпойнты, WAV и подготовленные признаки переживают перезапуск Colab;
-- CPU Docker smoke test для проверки зависимостей без видеокарты.
+- two ReFlow training steps;
+- validation;
+- checkpoint creation;
+- checkpoint discovery;
+- standard WAV inference;
+- direct realtime inference path.
 
-## Google Colab
+CPU preprocessing and inference use Parselmouth automatically. CUDA mode keeps RMVPE.
 
-Открой DDSP_SVC_ReFlow_Colab.ipynb в Google Colab и выбери GPU runtime.
+## Persistent datasets and checkpoints
 
-Прямая ссылка: https://colab.research.google.com/github/egor125552/DDSP-SVC-ReFlow-Colab/blob/main/DDSP_SVC_ReFlow_Colab.ipynb
+Colab sessions are disposable, so durable state is stored in Google Drive.
 
-Для Tesla T4 интерфейс начинает с batch size 32. Если памяти хватает, можно поднять. Если появляется CUDA out of memory, уменьши batch size.
+The workflow supports:
 
-Перед запуском Gradio блокнот выполняет GPU smoke test: проверяет CUDA, показывает модель GPU и VRAM, делает короткое FP16 вычисление и отдельно загружает RMVPE на GPU. Если Colab выдал CPU, блокнот остановится с понятным сообщением вместо того, чтобы начать мучительно медленное обучение.
+- `/content/DDSP-SVC/exp` backed by Google Drive;
+- `/content/DDSP-SVC/data` backed by Google Drive;
+- persistent WAV files;
+- persistent F0, mel, units, volume, augmented features, and pitch augmentation metadata;
+- persistent model checkpoints;
+- resume after a new Colab session.
+
+A tested checkpoint, `model_2.pt`, was successfully written to the Drive-backed experiment directory.
+
+## Fast local training cache
+
+Google Drive is useful for persistence but slower than Colab local storage.
+
+The UI therefore provides a fast local cache option.
+
+Before training, prepared features can be copied from persistent storage to `/content/ddsp-local-data`. Training then reads from the local Colab disk while checkpoints continue to be written to Google Drive.
+
+Before the cache is created, free local space is checked. If there is not enough room, the UI blocks the copy instead of filling the runtime disk.
+
+## Atomic dataset import
+
+Dataset replacement is atomic.
+
+A new ZIP is first unpacked and validated in a staging directory. Persistent train/validation data is replaced only after the new dataset passes preparation.
+
+This protects an existing working dataset from:
+
+- corrupted ZIP archives;
+- unsafe paths such as `../`;
+- archives with too few usable files;
+- individual broken WAV files;
+- suspicious compression ratios;
+- oversized archives;
+- insufficient local disk space.
+
+Current limits include up to 20,000 files and up to 20 GB of extracted data, while keeping approximately 2 GB of local reserve.
+
+Audio shorter than 0.5 seconds is skipped. Exact duplicates are removed. Train/validation shuffling is reproducible.
+
+## Dataset quality analysis
+
+The Dataset tab can analyze a reproducible sample of up to 500 files.
+
+For each file it measures:
+
+- duration;
+- peak level;
+- RMS;
+- near-silence ratio;
+- digital clipping ratio.
+
+Suspicious audio is surfaced as a warning or problem depending on how much of the dataset is affected.
+
+The report is cached by Dataset ID.
+
+## Dataset ID
+
+Every prepared dataset receives an ID derived from the normalized WAV contents.
+
+The experiment remembers that ID.
+
+If a checkpoint belongs to another dataset or has unknown provenance, training is blocked by default instead of silently mixing voices or states.
+
+Intentional fine-tuning on another dataset requires an explicit option.
+
+## Preprocessing integrity
+
+Training is not allowed to start merely because a preprocessing directory exists.
+
+For each WAV, the workflow checks the required artifacts, including:
+
+- F0;
+- volume;
+- augmented volume;
+- mel;
+- augmented mel;
+- units;
+- pitch augmentation metadata.
+
+Missing, empty, or damaged features block training and surface concrete errors.
+
+After successful preprocessing, `data/preprocessing_manifest.json` stores the Dataset ID and important extraction parameters.
+
+If a new Colab session finds matching intact features and a compatible manifest, preprocessing does not need to run again.
+
+## Checkpoint provenance
+
+Dataset identity is bound not only to the experiment directory but also to individual `model_*.pt` checkpoints through sidecar metadata.
+
+This matters when a run crashes during fine-tuning.
+
+An older checkpoint should not suddenly inherit the identity of a new dataset just because the active experiment changed.
+
+The workflow keeps pending training metadata, associates newly created checkpoints with the correct Dataset ID, and cleans orphaned sidecars after training.
+
+Legacy checkpoints without provenance metadata can be migrated explicitly through the UI after validation.
+
+## Resume behavior
+
+Training automatically discovers the checkpoint with the highest step number in the selected experiment.
+
+The upstream trainer restores model weights and global step.
+
+Optimizer state is saved by default for more complete resume behavior. This increases checkpoint size and can be disabled when storage matters more than optimizer continuity.
+
+## Adaptive segment length
+
+Training segment duration is not hard-coded to two seconds.
+
+It is selected from the shortest accepted clip, with a maximum of two seconds.
+
+This protects the upstream DataLoader from pathological behavior on short datasets.
+
+## Environment grader
+
+The UI includes a dedicated grader.
+
+It checks:
+
+- upstream source;
+- CUDA/GPU availability;
+- required pretrained models;
+- train/validation data;
+- Dataset ID;
+- preprocessing integrity;
+- preprocessing manifest compatibility;
+- local disk reserve;
+- latest checkpoint;
+- optimizer state;
+- checkpoint Dataset ID.
+
+The result is shown as explicit OK, warning, or problem states rather than an arbitrary numeric score.
 
 ## Realtime
 
-Оригинальный DDSP-SVC realtime использует локальные аудиоустройства через sounddevice. Это не работает напрямую в Colab, потому что микрофон находится в браузере пользователя, а Python работает на удалённой машине.
+The original DDSP-SVC realtime path uses local audio devices through `sounddevice`.
 
-Поэтому здесь есть отдельный экспериментальный браузерный realtime через Gradio. Он хранит контекст предыдущего звука и отправляет поток на модель. Это не равно локальному gui_reflow.py по минимальной задержке.
+That model does not map directly to Colab because the microphone lives in the browser while Python runs on a remote machine.
 
-Сам realtime обработчик проверен на Linux и выдаёт корректный поток 44,1 кГц. Настоящий микрофон браузера и реальная задержка на Tesla T4 требуют проверки уже в запущенном Colab. Python gradio_client 2.7 имеет отдельную проблему со streaming endpoint, поэтому для realtime ориентируйся на браузерный интерфейс, а не на gradio_client.
+This project therefore includes an experimental browser realtime path through Gradio.
 
-## Проверено на официальном Google Colab runtime
+It keeps previous audio context and sends streaming chunks to the model.
 
-16 сентября 2026 года полный smoke test был прогнан внутри официального образа Google `us-docker.pkg.dev/colab-images/public/runtime:latest`, digest `sha256:c4375de125f45948a10009001df52774da2573ea7bb2903f8bf945ec72690c5a`. В образе были Python 3.12.13, PyTorch 2.11.0+cu128 и CUDA runtime 12.8.
+This is not expected to match the latency of a local native realtime application.
 
-Версия upstream DDSP-SVC закреплена на commit `3635301027473c6662d05a1c73ef34fba7f15f90` (`optimize`, 12 августа 2026). И Colab notebook, и CPU Docker smoke test используют именно этот SHA. Это нужно, чтобы checkpoint и preprocessing не зависели от будущих несовместимых изменений upstream. Обновление DDSP-SVC теперь должно быть отдельным осознанным изменением с повторным smoke test.
+The realtime handler has been tested on Linux and produces a valid 44.1 kHz stream. Real browser microphone latency on a Tesla T4 should still be measured inside an active Colab GPU session.
 
-На сервере нет физической NVIDIA GPU, поэтому CUDA-вычисление и RMVPE на настоящей T4 этим тестом не покрыты. При этом в официальном Colab image через русский Gradio реально прошли: загрузка ZIP, разбиение train/val, приведение WAV к 44,1 кГц mono, preprocessing через ContentVec, два шага ReFlow-обучения, validation, сохранение `model_2.pt`, поиск чекпойнта, обычный inference до WAV и прямой realtime inference. На CPU preprocessing и inference автоматически используют Parselmouth; при CUDA остаётся RMVPE.
+## Linux and Docker smoke test
 
-Чекпойнт был сохранён через симлинк `/content/DDSP-SVC/exp` в смонтированный `/content/drive/MyDrive/DDSP-SVC-ReFlow/exp`, то есть проверена и схема сохранения в Google Drive. Тестовый `model_2.pt` имел размер 219734203 байта.
+A separate CPU Docker smoke test verifies the workflow without requiring a GPU.
 
-Отдельно проверена persistence-схема для датасета: `/content/DDSP-SVC/data` может быть симлинком на `/content/drive/MyDrive/DDSP-SVC-ReFlow/data`. После подготовки датасета и preprocessing на Drive физически остались WAV, `f0`, `mel`, `units`, `volume`, augmented-признаки и `pitch_aug_dict.npy`. После удаления локальной ссылки и её повторного создания все файлы снова были доступны без повторного preprocessing.
+It covers dependency installation, dataset preparation, preprocessing, a short training run, checkpoint save/reload, WAV inference, and the direct realtime handler.
 
-Для скорости обучения в Gradio добавлен включённый по умолчанию переключатель «Быстрый локальный кэш для обучения». Перед стартом обучения готовые признаки копируются из persistent `data` в `/content/ddsp-local-data`, и train/val читаются уже с локального диска Colab, а чекпойнты продолжают сохраняться в Google Drive. Эта схема также проверена в официальном Colab image: два шага обучения завершились с кодом 0, конфиг использовал локальные пути, а `model_2.pt` размером 219734203 байта появился в Drive-backed `exp`.
+Build:
 
-Импорт датасета сделан атомарным: новый ZIP сначала полностью проверяется и нормализуется во временной staging-папке, и только после успешной подготовки заменяет persistent `train/val`. Битый ZIP, небезопасные пути вида `../`, слишком малое число исправных файлов и единичные повреждённые WAV не уничтожают старый датасет. Файлы короче 0,5 секунды пропускаются, точные дубли удаляются, а train/val split перемешивается воспроизводимо.
-
-Перед распаковкой ZIP дополнительно проверяются количество файлов, суммарный распакованный размер, подозрительно высокий коэффициент сжатия и наличие достаточного локального места. Лимиты: до 20 000 файлов и до 20 ГБ распакованных данных; для распаковки оставляется примерно 2 ГБ резерва.
-
-Во вкладке «Датасет» есть анализ качества аудио. Он проверяет максимум 500 файлов воспроизводимой выборкой и кэшируется по Dataset ID. Для каждого файла измеряются длительность, peak, RMS, доля почти тишины и доля цифрового клиппинга. Подозрительными считаются почти пустой сигнал, RMS ниже примерно -35 dBFS, более 60% почти тишины и заметный клиппинг. Грейдер учитывает этот отчёт как предупреждение или проблему в зависимости от доли подозрительных файлов.
-
-Длительность тренировочного сегмента больше не жёстко равна 2 секундам. Она автоматически подбирается по самому короткому принятому клипу, с верхним пределом 2 секунды. Это защищает от зацикливания upstream DataLoader на слишком коротких записях.
-
-Каждый подготовленный датасет получает Dataset ID на основе содержимого нормализованных WAV. Папка эксперимента запоминает этот ID. Если найден checkpoint от другого или неизвестного датасета, обучение по умолчанию блокируется вместо молчаливого смешивания голосов. Для осознанного переноса модели есть отдельный флажок «Разрешить fine-tune существующего checkpoint на другом датасете».
-
-Перед training выполняется полная проверка целостности preprocessing. Для каждого WAV проверяются соответствующие `f0`, `volume`, `aug_vol`, `mel`, `aug_mel`, `units` и запись в `pitch_aug_dict.npy`. Отсутствующий, пустой или повреждённый файл блокирует training до повторного preprocessing и показывает первые найденные проблемы.
-
-После успешного preprocessing сохраняется `data/preprocessing_manifest.json` с Dataset ID и ключевыми параметрами извлечения признаков. Если после новой Colab-сессии все признаки целы и manifest совпадает, повторное нажатие «Подготовить признаки» не запускает ContentVec/F0 заново.
-
-Dataset ID теперь привязан не только к эксперименту, но и к конкретному `model_*.pt` через sidecar-файл. Во время training на Drive также хранится pending-описание. Если Colab упал до первого нового checkpoint, старый checkpoint сохраняет старый Dataset ID. Если новый checkpoint успел появиться, следующая сессия автоматически привязывает к нему Dataset ID активного training. Это защищает resume после аварийного fine-tune.
-
-Для старых checkpoint без sidecar в интерфейсе есть явная миграция «Привязать legacy checkpoint к текущему Dataset ID». Она работает только для checkpoint без существующего Dataset ID, требует целый текущий preprocessing и проверяет наличие ключей `model` и `global_step`. Уже размеченный checkpoint автоматически не перезаписывается.
-
-Pending-синхронизация размечает Dataset ID у всех checkpoint, созданных после старта конкретного training, включая постоянные старые checkpoint, которые upstream оставляет через `interval_force_save`. Sidecar-файлы, чей `model_*.pt` уже удалён upstream, очищаются автоматически после training.
-
-Перед training manifest preprocessing сравнивается с конфигурацией, которая будет реально использоваться. Целые, но созданные с другой конфигурацией признаки не принимаются: интерфейс просит повторно запустить preprocessing. Это особенно важно при переходе между CPU/Parselmouth и CUDA/RMVPE.
-
-Статус системы показывает размер persistent `data`, свободное место локального `/content` и доступное место Google Drive, если файловая система отдаёт эти значения. Перед созданием быстрого локального кэша проверяется запас места: требуется размер данных с резервом плюс примерно 1 ГБ. При нехватке места training не стартует с копированием и предлагает отключить локальный кэш или освободить диск.
-
-Имя эксперимента валидируется до работы с файловой системой. Разрешены обычные имена, в том числе кириллица и пробелы; запрещены `/`, `\\`, `.`, `..`, управляющие символы и имена длиннее 80 символов.
-
-В интерфейсе есть отдельная вкладка «Грейдер». Она одним запуском проверяет исходники DDSP-SVC, CUDA/GPU, обязательные pretrained-модели, train/val, Dataset ID, целостность preprocessing, соответствие preprocessing manifest текущей среде, запас локального диска, последний checkpoint, optimizer и Dataset ID checkpoint. Результат выводится как список `OK / ПРЕДУПРЕЖДЕНИЕ / ПРОБЛЕМА` без искусственного числового рейтинга.
-
-После завершения training с кодом 0 вкладка статуса автоматически проверяет последний checkpoint именно активного эксперимента: синхронизирует Dataset ID, читает файл через `torch.load` и показывает шаг, размер, optimizer и Dataset ID. Если процесс завершился с ошибкой или код 0 получен без checkpoint, это отображается явно.
-
-Обучение автоматически продолжает последний checkpoint в выбранной папке `exp`: оригинальный DDSP-SVC выбирает `model_*.pt` с максимальным номером шага, восстанавливает веса и `global_step`. В интерфейсе по умолчанию включено сохранение optimizer, поэтому при новых checkpoint сохраняется и его состояние для более полноценного resume. Это увеличивает размер checkpoint; настройку можно отключить, если важнее экономия места.
-
-Установка исходного `requirements.txt` DDSP-SVC понижает NumPy до 1.26.4, из-за чего pip сообщает конфликты с некоторыми посторонними пакетами, уже лежащими в Colab image. На проверенный DDSP-SVC/Gradio workflow это не повлияло.
-
-## Проверено на Linux
-
-В отдельном CPU Docker smoke test также прошли установка зависимостей, подготовка датасета, preprocessing, два шага обучения, сохранение чекпойнта, повторная загрузка модели, обычный inference до WAV и прямой вызов realtime обработчика. Для CPU автоматически используется Parselmouth, а на CUDA остаётся RMVPE.
-
-## Docker smoke test
-
-Dockerfile.cpu-smoke специально использует CPU PyTorch. Он нужен не для качественного обучения, а чтобы на Linux без GPU проверить установку зависимостей, preprocessing и короткий запуск обучения.
-
-Сборка:
-
+```bash
 docker build -f Dockerfile.cpu-smoke -t ddsp-svc-reflow-smoke .
+```
 
-После сборки сначала скачай предобученные файлы:
+Download pretrained files:
 
-docker run --rm -v ddsp-pretrain:/workspace/DDSP-SVC/pretrain ddsp-svc-reflow-smoke bash /workspace/tools/download_pretrained.sh
+```bash
+docker run --rm -v ddsp-pretrain:/workspace/DDSP-SVC/pretrain \
+  ddsp-svc-reflow-smoke \
+  bash /workspace/tools/download_pretrained.sh
+```
 
-Затем можно запускать smoke test с тем же volume.
+## Known environment caveat
+
+The upstream DDSP-SVC requirements currently downgrade NumPy to 1.26.4.
+
+That may produce dependency warnings for unrelated packages already present in the Colab image.
+
+The tested DDSP-SVC and Gradio workflow continued to function in the verified environment.
+
+## Documentation
+
+See `docs/overview.md` for a concise technical overview intended for external readers.
+
+## Repository
+
+https://github.com/egor125552/DDSP-SVC-ReFlow-Colab
