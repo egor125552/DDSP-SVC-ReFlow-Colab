@@ -35,7 +35,7 @@ def tail_text(path, lines=80):
     data = p.read_text(errors="replace").splitlines()
     return "\n".join(data[-lines:])
 
-def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab", epochs=100000, interval_val=2000, interval_force_save=10000, fast_local_data=False):
+def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab", epochs=100000, interval_val=2000, interval_force_save=10000, fast_local_data=False, save_optimizer=True):
     src = DDSP_ROOT / "configs" / "reflow.yaml"
     dst = DDSP_ROOT / "configs" / "reflow-colab.yaml"
     cfg = yaml.safe_load(src.read_text())
@@ -54,6 +54,7 @@ def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab", epochs=
     cfg["train"]["epochs"] = max(1, int(epochs))
     cfg["train"]["interval_val"] = max(1, int(interval_val))
     cfg["train"]["interval_force_save"] = max(int(interval_force_save), int(interval_val))
+    cfg["train"]["save_opt"] = bool(save_optimizer)
     dst.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
     return dst
 
@@ -107,10 +108,12 @@ def run_preprocess(batch_size, cache_all, exp_name, epochs, interval_val, interv
     p = subprocess.run(cmd, cwd=DDSP_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     return p.stdout[-12000:]
 
-def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save, fast_local_data):
+def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save, fast_local_data, save_optimizer):
     global TRAIN_PROCESS, TRAIN_LOG
     if TRAIN_PROCESS is not None and TRAIN_PROCESS.poll() is None:
         return "Обучение уже идёт."
+
+    resume_from = latest_checkpoint(exp_name)
 
     if fast_local_data:
         source = DDSP_ROOT / "data"
@@ -125,6 +128,7 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
     cfg = make_config(
         batch_size, cache_all, exp_name, epochs, interval_val, interval_force_save,
         fast_local_data=bool(fast_local_data),
+        save_optimizer=bool(save_optimizer),
     )
     log_dir = DDSP_ROOT / "logs"
     log_dir.mkdir(exist_ok=True)
@@ -137,7 +141,12 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
         stderr=subprocess.STDOUT,
         text=True,
     )
-    return f"Обучение запущено. PID {TRAIN_PROCESS.pid}. Кнопка Статус покажет последние строки."
+    if resume_from:
+        resume_note = f"Продолжаем с {Path(resume_from).name}."
+    else:
+        resume_note = "Готового чекпойнта нет, начинаем с нуля."
+    optimizer_note = "Состояние optimizer сохраняется." if save_optimizer else "Optimizer не сохраняется."
+    return f"Обучение запущено. PID {TRAIN_PROCESS.pid}. {resume_note} {optimizer_note} Кнопка Статус покажет последние строки."
 
 def training_status():
     global TRAIN_PROCESS
@@ -294,9 +303,13 @@ with gr.Blocks(title="DDSP-SVC ReFlow для Google Colab") as demo:
             value=True,
             label="Быстрый локальный кэш для обучения. Признаки останутся на Google Drive, но обучение будет читать их из /content",
         )
+        save_optimizer = gr.Checkbox(
+            value=True,
+            label="Сохранять optimizer для полноценного продолжения обучения после новой сессии",
+        )
         train_log = gr.Textbox(label="Журнал", lines=18)
         preprocess_inputs = [batch, cache, exp_name, epochs, interval_val, interval_force_save]
-        training_inputs = preprocess_inputs + [fast_local_data]
+        training_inputs = preprocess_inputs + [fast_local_data, save_optimizer]
         gr.Button("Подготовить признаки").click(run_preprocess, preprocess_inputs, train_log)
         gr.Button("Запустить обучение").click(start_training, training_inputs, train_log)
         gr.Button("Показать статус").click(training_status, outputs=train_log)
