@@ -11,7 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m pip install --upgrade pip setuptools wheel
 RUN pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu
 
-RUN git clone --depth 1 https://github.com/yxlllc/DDSP-SVC.git /workspace/DDSP-SVC
+ARG DDSP_SVC_COMMIT=3635301027473c6662d05a1c73ef34fba7f15f90
+RUN mkdir -p /workspace/DDSP-SVC \
+    && git -C /workspace/DDSP-SVC init -q \
+    && git -C /workspace/DDSP-SVC remote add origin https://github.com/yxlllc/DDSP-SVC.git \
+    && git -C /workspace/DDSP-SVC fetch -q --depth 1 origin "${DDSP_SVC_COMMIT}" \
+    && git -C /workspace/DDSP-SVC checkout -q --detach FETCH_HEAD
 WORKDIR /workspace/DDSP-SVC
 RUN pip install -r requirements.txt
 RUN pip install setuptools==80.9.0
