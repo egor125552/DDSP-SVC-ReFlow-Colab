@@ -384,10 +384,11 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
     if not dataset_fp:
         return "Не удалось определить fingerprint датасета. Подготовь датасет заново."
 
-    resume_from = latest_checkpoint(exp_name)
     exp_dir = DDSP_ROOT / "exp" / exp_name
-    exp_fp_file = exp_dir / "dataset_fingerprint.txt"
-    previous_fp = exp_fp_file.read_text(errors="replace").strip() if exp_fp_file.exists() else ""
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    sync_pending_checkpoint_identity(exp_name)
+    resume_from = latest_checkpoint(exp_name)
+    previous_fp = checkpoint_dataset_fingerprint(resume_from)
 
     if resume_from and previous_fp != dataset_fp and not allow_dataset_change:
         reason = (
@@ -401,8 +402,14 @@ def start_training(batch_size, cache_all, exp_name, epochs, interval_val, interv
             "«Разрешить fine-tune на другом датасете»."
         )
 
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    exp_fp_file.write_text(dataset_fp + "\n")
+    start_step = _checkpoint_step(resume_from) if resume_from else -1
+    pending_path = _pending_training_path(exp_name)
+    pending_path.write_text(json.dumps({
+        "dataset_fingerprint": dataset_fp,
+        "start_step": start_step,
+        "resume_from": Path(resume_from).name if resume_from else "",
+        "fine_tune": bool(resume_from and previous_fp != dataset_fp),
+    }, ensure_ascii=False, indent=2) + "\n")
 
     cache_note = ""
     if fast_local_data:
@@ -462,6 +469,12 @@ def training_status():
     if TRAIN_PROCESS is not None:
         code = TRAIN_PROCESS.poll()
         state = "идёт" if code is None else f"завершено, код {code}"
+
+    exp_root = DDSP_ROOT / "exp"
+    if exp_root.exists():
+        for pending in exp_root.glob("*/pending_dataset.json"):
+            sync_pending_checkpoint_identity(pending.parent.name)
+
     log = tail_text(TRAIN_LOG) if TRAIN_LOG else "Журнал пока пуст."
     return f"Состояние: {state}\n\n{log}"
 
@@ -474,6 +487,12 @@ def stop_training():
         TRAIN_PROCESS.wait(timeout=10)
     except subprocess.TimeoutExpired:
         TRAIN_PROCESS.kill()
+
+    exp_root = DDSP_ROOT / "exp"
+    if exp_root.exists():
+        for pending in exp_root.glob("*/pending_dataset.json"):
+            sync_pending_checkpoint_identity(pending.parent.name)
+
     return "Обучение остановлено. Чекпойнты, которые успели сохраниться, не удалены."
 
 def _checkpoint_step(path):
@@ -481,6 +500,49 @@ def _checkpoint_step(path):
         return int(Path(path).stem.rsplit("_", 1)[1])
     except (IndexError, ValueError):
         return -1
+
+def _checkpoint_dataset_sidecar(path):
+    path = Path(path)
+    return path.with_name(path.name + ".dataset_fingerprint.txt")
+
+def checkpoint_dataset_fingerprint(path):
+    if not path:
+        return ""
+    sidecar = _checkpoint_dataset_sidecar(path)
+    if not sidecar.exists():
+        return ""
+    try:
+        return sidecar.read_text(errors="replace").strip()
+    except OSError:
+        return ""
+
+def _pending_training_path(exp_name):
+    return DDSP_ROOT / "exp" / exp_name / "pending_dataset.json"
+
+def sync_pending_checkpoint_identity(exp_name):
+    pending_path = _pending_training_path(exp_name)
+    if not pending_path.exists():
+        return ""
+    try:
+        pending = json.loads(pending_path.read_text(errors="replace"))
+        dataset_fp = str(pending.get("dataset_fingerprint", "")).strip()
+        start_step = int(pending.get("start_step", -1))
+    except Exception:
+        return ""
+
+    latest = latest_checkpoint(exp_name)
+    if not latest:
+        return ""
+    latest_step = _checkpoint_step(latest)
+    if not dataset_fp or latest_step <= start_step:
+        return ""
+
+    sidecar = _checkpoint_dataset_sidecar(latest)
+    sidecar.write_text(dataset_fp + "\n")
+    pending["start_step"] = latest_step
+    pending["last_checkpoint"] = Path(latest).name
+    pending_path.write_text(json.dumps(pending, ensure_ascii=False, indent=2) + "\n")
+    return str(latest)
 
 def latest_checkpoint(exp_name):
     exp = DDSP_ROOT / "exp" / exp_name
@@ -503,9 +565,11 @@ def inspect_checkpoint(model_path):
     has_model = "model" in ckpt
     has_optimizer = ckpt.get("optimizer") is not None
     size_mb = path.stat().st_size / 2**20
+    dataset_fp = checkpoint_dataset_fingerprint(path)
     return "\n".join([
         f"Файл: {path}",
         f"Шаг: {step}",
+        f"Dataset ID: {dataset_fp[:12] if dataset_fp else 'неизвестен'}",
         f"Размер: {size_mb:.1f} МБ",
         f"Веса модели: {'есть' if has_model else 'нет'}",
         f"Optimizer: {'есть, полноценный resume' if has_optimizer else 'нет, продолжатся только веса и шаг'}",
