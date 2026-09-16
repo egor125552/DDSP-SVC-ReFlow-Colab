@@ -35,12 +35,29 @@ def tail_text(path, lines=80):
     data = p.read_text(errors="replace").splitlines()
     return "\n".join(data[-lines:])
 
+def training_segment_duration():
+    wavs = list((DDSP_ROOT / "data/train/audio").glob("*.wav"))
+    wavs += list((DDSP_ROOT / "data/val/audio").glob("*.wav"))
+    durations = []
+    for path in wavs:
+        try:
+            info = sf.info(path)
+            if info.samplerate > 0 and info.frames > 0:
+                durations.append(info.frames / info.samplerate)
+        except Exception:
+            continue
+    if not durations:
+        return 2.0
+    shortest = min(durations)
+    return round(max(0.25, min(2.0, shortest - 0.05)), 3)
+
 def make_config(batch_size=32, cache_all=False, exp_name="reflow-colab", epochs=100000, interval_val=2000, interval_force_save=10000, fast_local_data=False, save_optimizer=True):
     src = DDSP_ROOT / "configs" / "reflow.yaml"
     dst = DDSP_ROOT / "configs" / "reflow-colab.yaml"
     cfg = yaml.safe_load(src.read_text())
     cfg["device"] = "cuda" if torch.cuda.is_available() else "cpu"
     cfg["data"]["f0_extractor"] = "rmvpe" if torch.cuda.is_available() else "parselmouth"
+    cfg["data"]["duration"] = training_segment_duration()
     if fast_local_data:
         local_data = Path(os.environ.get("DDSP_LOCAL_DATA", "/content/ddsp-local-data")).resolve()
         cfg["data"]["train_path"] = str(local_data / "train")
@@ -79,6 +96,7 @@ def system_status():
         f"GPU: {gpu}",
         f"Датасет: train {train_wavs} WAV, val {val_wavs} WAV",
         f"Preprocessing: {'готов' if preprocess_ready else 'не готов'}",
+        f"Сегмент обучения: {training_segment_duration():.3f} с",
         f"Последний checkpoint: {last_ckpt.name if last_ckpt else 'нет'}",
     ]
     for p in [
@@ -116,17 +134,22 @@ def prepare_dataset(zip_path, validation_count):
             return "Нужно хотя бы 3 WAV файла. Старый датасет не изменён."
 
         prepared = []
-        skipped = []
+        skipped_broken = []
+        skipped_short = []
         for src in wavs:
             try:
                 audio, _ = librosa.load(src, sr=44100, mono=True)
                 if audio is None or len(audio) == 0:
                     raise ValueError("пустой аудиофайл")
+                duration = len(audio) / 44100
+                if duration < 0.5:
+                    skipped_short.append((src.name, duration))
+                    continue
                 out = stage / f"{len(prepared):05d}.wav"
                 sf.write(out, audio, 44100)
                 prepared.append(out)
             except Exception as exc:
-                skipped.append((src.name, str(exc)))
+                skipped_broken.append((src.name, str(exc)))
 
         if len(prepared) < 3:
             return (
@@ -150,10 +173,17 @@ def prepare_dataset(zip_path, validation_count):
         shutil.copytree(new_train, train_root)
         shutil.copytree(new_val, val_root)
 
-        skipped_note = f" Пропущено битых WAV: {len(skipped)}." if skipped else ""
+        skipped_notes = []
+        if skipped_broken:
+            skipped_notes.append(f"битых: {len(skipped_broken)}")
+        if skipped_short:
+            skipped_notes.append(f"короче 0,5 с: {len(skipped_short)}")
+        skipped_note = f" Пропущено WAV ({', '.join(skipped_notes)})." if skipped_notes else ""
+        segment = training_segment_duration()
         return (
             f"Готово. Обучение: {len(prepared)-n_val} файлов. Проверка: {n_val}. "
-            f"Все приведено к 44,1 кГц mono.{skipped_note} Старые признаки очищены, "
+            f"Все приведено к 44,1 кГц mono.{skipped_note} "
+            f"Сегмент обучения будет {segment:.3f} с. Старые признаки очищены, "
             "теперь нажми «Подготовить признаки»."
         )
     finally:
