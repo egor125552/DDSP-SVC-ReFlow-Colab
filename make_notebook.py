@@ -44,15 +44,20 @@ if torch.cuda.is_available():
 
 drive_root = Path('/content/drive/MyDrive/DDSP-SVC-ReFlow')
 drive_root.mkdir(parents=True, exist_ok=True)
-exp_link = Path('/content/DDSP-SVC/exp')
-if exp_link.exists() or exp_link.is_symlink():
-    if exp_link.is_symlink() or exp_link.is_file():
-        exp_link.unlink()
-    else:
-        shutil.rmtree(exp_link)
-os.symlink(drive_root / 'exp', exp_link, target_is_directory=True)
-(drive_root / 'exp').mkdir(exist_ok=True)
-print('Чекпойнты будут сохраняться в', drive_root / 'exp')"""),
+
+for name in ('exp', 'data'):
+    target = drive_root / name
+    target.mkdir(exist_ok=True)
+    link = Path('/content/DDSP-SVC') / name
+    if link.exists() or link.is_symlink():
+        if link.is_symlink() or link.is_file():
+            link.unlink()
+        else:
+            shutil.rmtree(link)
+    os.symlink(target, link, target_is_directory=True)
+
+print('Чекпойнты будут сохраняться в', drive_root / 'exp')
+print('Датасет и подготовленные признаки будут сохраняться в', drive_root / 'data')"""),
     code("""!bash /content/DDSP-SVC-ReFlow-Colab/scripts/download_pretrained.sh /content/DDSP-SVC
 print('Предобученные модели готовы')"""),
     code("""import os
