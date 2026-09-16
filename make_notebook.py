@@ -56,6 +56,40 @@ print('Чекпойнты будут сохраняться в', drive_root / 'e
     code("""!bash /content/DDSP-SVC-ReFlow-Colab/scripts/download_pretrained.sh /content/DDSP-SVC
 print('Предобученные модели готовы')"""),
     code("""import os
+from pathlib import Path
+import numpy as np
+import torch
+
+if not torch.cuda.is_available():
+    raise RuntimeError('CUDA недоступна. В Colab выбери Среда выполнения → Изменить среду выполнения → GPU.')
+
+gpu = torch.cuda.get_device_name(0)
+vram = torch.cuda.get_device_properties(0).total_memory / 2**30
+print('GPU smoke test')
+print('GPU:', gpu)
+print('VRAM, ГБ:', round(vram, 1))
+print('CUDA:', torch.version.cuda)
+
+# Быстрый реальный CUDA тест
+x = torch.randn(1024, 1024, device='cuda', dtype=torch.float16)
+y = x @ x
+torch.cuda.synchronize()
+print('CUDA вычисление: OK', tuple(y.shape))
+
+# Проверяем, что RMVPE действительно загружается на GPU и обрабатывает аудио
+os.environ['DDSP_ROOT'] = '/content/DDSP-SVC'
+os.chdir('/content/DDSP-SVC')
+from ddsp.vocoder import F0_Extractor
+
+rmvpe = Path('pretrain/rmvpe/model.pt')
+if not rmvpe.exists():
+    raise FileNotFoundError(f'RMVPE не найден: {rmvpe}')
+
+audio = (0.05 * np.sin(2 * np.pi * 220 * np.arange(44100, dtype=np.float32) / 44100)).astype(np.float32)
+f0 = F0_Extractor('rmvpe', 44100, 512, 50.0, 1100.0).extract(audio, uv_interp=True, device='cuda')
+print('RMVPE CUDA: OK, кадров:', len(f0))
+print('GPU smoke test завершён успешно')"""),
+    code("""import os
 os.environ['DDSP_ROOT'] = '/content/DDSP-SVC'
 %cd /content/DDSP-SVC
 !python /content/DDSP-SVC-ReFlow-Colab/colab_app.py"""),
