@@ -13,7 +13,7 @@
 - поиск последнего чекпойнта;
 - обычное преобразование WAV;
 - экспериментальный realtime из микрофона браузера;
-- сохранение папки exp в Google Drive;
+- сохранение папок exp и data в Google Drive: чекпойнты, WAV и подготовленные признаки переживают перезапуск Colab;
 - CPU Docker smoke test для проверки зависимостей без видеокарты.
 
 ## Google Colab
@@ -41,6 +41,8 @@
 На сервере нет физической NVIDIA GPU, поэтому CUDA-вычисление и RMVPE на настоящей T4 этим тестом не покрыты. При этом в официальном Colab image через русский Gradio реально прошли: загрузка ZIP, разбиение train/val, приведение WAV к 44,1 кГц mono, preprocessing через ContentVec, два шага ReFlow-обучения, validation, сохранение `model_2.pt`, поиск чекпойнта, обычный inference до WAV и прямой realtime inference. На CPU preprocessing и inference автоматически используют Parselmouth; при CUDA остаётся RMVPE.
 
 Чекпойнт был сохранён через симлинк `/content/DDSP-SVC/exp` в смонтированный `/content/drive/MyDrive/DDSP-SVC-ReFlow/exp`, то есть проверена и схема сохранения в Google Drive. Тестовый `model_2.pt` имел размер 219734203 байта.
+
+Отдельно проверена persistence-схема для датасета: `/content/DDSP-SVC/data` может быть симлинком на `/content/drive/MyDrive/DDSP-SVC-ReFlow/data`. После подготовки датасета и preprocessing на Drive физически остались WAV, `f0`, `mel`, `units`, `volume`, augmented-признаки и `pitch_aug_dict.npy`. После удаления локальной ссылки и её повторного создания все файлы снова были доступны без повторного preprocessing.
 
 Установка исходного `requirements.txt` DDSP-SVC понижает NumPy до 1.26.4, из-за чего pip сообщает конфликты с некоторыми посторонними пакетами, уже лежащими в Colab image. На проверенный DDSP-SVC/Gradio workflow это не повлияло.
 
