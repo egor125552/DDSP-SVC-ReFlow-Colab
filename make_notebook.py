@@ -34,9 +34,20 @@ print('Google Drive подключён')"""),
 %cd /content/DDSP-SVC
 !git rev-parse HEAD
 !python -m pip install -q --upgrade pip
-!python -m pip install -q -r requirements.txt
+!python /content/DDSP-SVC-ReFlow-Colab/scripts/make_colab_requirements.py requirements.txt /tmp/ddsp-requirements-colab.txt
+!python -m pip install -q -r /tmp/ddsp-requirements-colab.txt
 !python -m pip install -q -r /content/DDSP-SVC-ReFlow-Colab/requirements-extra.txt
-print('Зависимости установлены')"""),
+!python - <<'PY'
+import numpy, numba, resampy, torchcrepe
+from ddsp.vocoder import F0_Extractor
+print('Dependency smoke: OK')
+print('NumPy:', numpy.__version__)
+print('Numba:', numba.__version__)
+print('resampy:', getattr(resampy, '__version__', 'unknown'))
+print('torchcrepe import: OK')
+print('ddsp.vocoder import: OK')
+PY
+print('Зависимости установлены и проверены')"""),
     code("""import os, shutil
 from pathlib import Path
 import torch
@@ -84,13 +95,18 @@ print('CUDA:', torch.version.cuda)
 
 tested = {
     'python_major_minor': (3, 12),
+    'supported_python': {(3, 12), (3, 13)},
     'torch_prefix': '2.11.',
     'cuda_prefix': '12.8',
 }
 import sys
 runtime_warnings = []
-if sys.version_info[:2] != tested['python_major_minor']:
-    runtime_warnings.append(f"Python {sys.version_info.major}.{sys.version_info.minor}, тестировался Python 3.12")
+if sys.version_info[:2] not in tested['supported_python']:
+    runtime_warnings.append(
+        f"Python {sys.version_info.major}.{sys.version_info.minor}, поддерживаются 3.12 и 3.13"
+    )
+elif sys.version_info[:2] == (3, 13):
+    print('Python 3.13: включён compatibility path для NumPy/Numba.')
 if not str(torch.__version__).startswith(tested['torch_prefix']):
     runtime_warnings.append(f"PyTorch {torch.__version__}, тестировался PyTorch 2.11.x")
 if not str(torch.version.cuda).startswith(tested['cuda_prefix']):
